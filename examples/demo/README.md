@@ -428,13 +428,11 @@ See [tests/README.md](tests/README.md) for the full test guide, including focuse
 
 ## Building and selecting signature suites
 
-The demo uses the protocol SDK in this checkout through the repository-relative
-`file:../../sdk/protocol` dependency. Build the SDK first so type checks and tests
-exercise the candidate implementation rather than a previously published package:
+The demo installs the published `@oma3/mpas@0.1.0-alpha.13` package from the npm
+registry. Do not point it at a local `file:` SDK path or `node_modules` symlink
+when validating a release:
 
 ```sh
-npm --prefix sdk/protocol ci
-npm --prefix sdk/protocol run build
 npm --prefix examples/demo ci
 npm --prefix examples/demo run build
 ```
