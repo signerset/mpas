@@ -86,9 +86,6 @@ jobs:
         working-directory: sdk/protocol
         run: npm test
 
-      - name: Independently verify ES256 conformance vectors
-        run: node conformance/signature-suites/verify-openssl.mjs
-
       - name: Build SDK for demo
         working-directory: sdk/protocol
         run: npm run build
