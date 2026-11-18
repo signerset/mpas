@@ -121,10 +121,53 @@ export interface UnsatisfiedThreshold {
   eligibleSigners: Did[];
 }
 
+/**
+ * The part of the effective requirement tree that the submitted Approvals did
+ * not satisfy, with its allOf/anyOf structure preserved.
+ *
+ * - `threshold`: one threshold that is not yet met.
+ * - `allOf`: the nested requirements that are still unmet; every one must be
+ *   satisfied. Nested requirements that were already satisfied are omitted.
+ * - `anyOf`: every alternative, none of which is satisfied; satisfying any one
+ *   is enough.
+ *
+ * When several policy entries match, the tree's root is an `allOf` over their
+ * unmet requirements, mirroring how the entries are combined for evaluation.
+ */
+export type UnmetRequirement = UnmetThresholdNode | UnmetAllOfNode | UnmetAnyOfNode;
+
+export interface UnmetThresholdNode {
+  type: "threshold";
+  unsatisfied: UnsatisfiedThreshold;
+}
+
+export interface UnmetAllOfNode {
+  type: "allOf";
+  requirements: UnmetRequirement[];
+}
+
+export interface UnmetAnyOfNode {
+  type: "anyOf";
+  requirements: UnmetRequirement[];
+}
+
 export type PolicyResult =
   | { status: "satisfied" }
   | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY" | "CONFLICTING_SIGNER_DECISIONS"; message: string }
-  | { status: "additionalApprovalsRequired"; unsatisfiedRules: UnsatisfiedThreshold[] }
+  | {
+      status: "additionalApprovalsRequired";
+      /** Unmet requirement tree with allOf/anyOf preserved. Use this to build Authorization Requirements. */
+      unmetRequirement: UnmetRequirement;
+      /**
+       * Flat list of unmet thresholds that together form one sufficient path:
+       * every allOf member, but only the first alternative of each unmet anyOf.
+       * It carries no structure, so it cannot say which thresholds are
+       * alternatives.
+       *
+       * @deprecated Use `unmetRequirement`.
+       */
+      unsatisfiedRules: UnsatisfiedThreshold[];
+    }
   /**
    * The Action Package (or policy) contains a value that prevents
    * deterministic evaluation — e.g. a numeric condition over a value that
@@ -419,63 +462,81 @@ export function evaluatePolicy(
   }
 
   // Evaluate the effective requirement tree.
-  const unsatisfied = evaluateRequirement(effectiveRequirement, verifiedApprovals, policy, proposerDid);
+  const unmet = evaluateRequirement(effectiveRequirement, verifiedApprovals, policy, proposerDid);
 
-  if (unsatisfied.length === 0) {
+  if (unmet === null) {
     return { status: "satisfied" };
   }
 
   return {
     status: "additionalApprovalsRequired",
-    unsatisfiedRules: unsatisfied,
+    unmetRequirement: unmet,
+    unsatisfiedRules: firstSufficientPath(unmet),
   };
 }
 
 /**
  * Recursively evaluates a requirement tree.
- * Returns an array of unsatisfied threshold requirements (empty if satisfied).
+ * Returns the unmet part of the tree, or null when the requirement is satisfied.
  */
 function evaluateRequirement(
   requirement: Requirement,
   verifiedApprovals: VerifiedApprovals,
   policy: PolicyConfig,
   proposerDid?: string,
-): UnsatisfiedThreshold[] {
+): UnmetRequirement | null {
   switch (requirement.type) {
     case "proposerOnly":
       // Proposer's valid approval is sufficient — always satisfied at this level.
       // (The proposer's envelope signature was verified upstream.)
-      return [];
+      return null;
 
-    case "threshold":
-      return evaluateThreshold(requirement, verifiedApprovals, policy, proposerDid);
+    case "threshold": {
+      const unsatisfied = evaluateThreshold(requirement, verifiedApprovals, policy, proposerDid);
+      return unsatisfied === null ? null : { type: "threshold", unsatisfied };
+    }
 
-    case "allOf":
+    case "allOf": {
       // All nested requirements must be satisfied (vacuously true when empty).
-      return (Array.isArray(requirement.requirements) ? requirement.requirements : []).flatMap((r) =>
-        evaluateRequirement(r, verifiedApprovals, policy, proposerDid),
-      );
+      const unmet = (Array.isArray(requirement.requirements) ? requirement.requirements : [])
+        .map((r) => evaluateRequirement(r, verifiedApprovals, policy, proposerDid))
+        .filter((r): r is UnmetRequirement => r !== null);
+      return unmet.length === 0 ? null : { type: "allOf", requirements: unmet };
+    }
 
     case "anyOf": {
       // An anyOf over zero requirements is unsatisfiable. Policy validation
       // should reject such policies at load time; evaluation fails closed.
       if (!Array.isArray(requirement.requirements) || requirement.requirements.length === 0) {
-        return [unsatisfiableRequirement()];
+        return { type: "threshold", unsatisfied: unsatisfiableRequirement() };
       }
       // At least one nested requirement must be fully satisfied.
+      const alternatives: UnmetRequirement[] = [];
       for (const r of requirement.requirements) {
         const result = evaluateRequirement(r, verifiedApprovals, policy, proposerDid);
-        if (result.length === 0) {
-          return []; // This branch is satisfied.
+        if (result === null) {
+          return null; // This branch is satisfied.
         }
+        alternatives.push(result);
       }
-      // None satisfied — return the unsatisfied from the first branch as representative.
-      // (The operator can see what's needed for any path.)
-      return evaluateRequirement(requirement.requirements[0], verifiedApprovals, policy, proposerDid);
+      // None satisfied — every alternative remains a way to satisfy it.
+      return { type: "anyOf", requirements: alternatives };
     }
 
     default:
-      return [];
+      return null;
+  }
+}
+
+/** Every allOf member and the first alternative of each anyOf, as a flat list. */
+function firstSufficientPath(unmet: UnmetRequirement): UnsatisfiedThreshold[] {
+  switch (unmet.type) {
+    case "threshold":
+      return [unmet.unsatisfied];
+    case "allOf":
+      return unmet.requirements.flatMap(firstSufficientPath);
+    case "anyOf":
+      return firstSufficientPath(unmet.requirements[0]);
   }
 }
 
@@ -484,9 +545,9 @@ function evaluateThreshold(
   verifiedApprovals: VerifiedApprovals,
   policy: PolicyConfig,
   proposerDid?: string,
-): UnsatisfiedThreshold[] {
+): UnsatisfiedThreshold | null {
   if (requirement.threshold === 0) {
-    return [];
+    return null;
   }
 
   const decision = requirement.decision ?? "approve";
@@ -514,19 +575,17 @@ function evaluateThreshold(
   ).size;
 
   if (found >= requirement.threshold) {
-    return [];
+    return null;
   }
 
-  return [
-    {
-      requirement,
-      requiredRole: requirement.eligibleSignerGroup ?? "unknown",
-      requiredDecision: decision,
-      threshold: requirement.threshold,
-      found,
-      eligibleSigners,
-    },
-  ];
+  return {
+    requirement,
+    requiredRole: requirement.eligibleSignerGroup ?? "unknown",
+    requiredDecision: decision,
+    threshold: requirement.threshold,
+    found,
+    eligibleSigners,
+  };
 }
 
 /** Synthetic unsatisfied entry for structurally unsatisfiable requirements (fail closed). */
