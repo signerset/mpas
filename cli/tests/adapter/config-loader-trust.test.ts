@@ -192,9 +192,7 @@ describe("plugin trust confirmation during config loading", () => {
     expect(NO_PRIMARY_TRUST_EVIDENCE_WARNING).toContain(
       "responsibility claim or cybersecurity assessment",
     );
-    expect(RESPONSIBILITY_CLAIM_TRUST_NOTICE).toContain(
-      "does not establish that the responsible party is legitimate",
-    );
+    expect(RESPONSIBILITY_CLAIM_TRUST_NOTICE).toContain("If you trust just one");
   });
 
   it("reports an artifact trust API failure as unavailable, not as empty evidence", async () => {

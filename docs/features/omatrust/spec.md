@@ -104,11 +104,12 @@ in v1 speaks to publisher legitimacy — the operator's judgement is the only
 control for it.
 
 Claims naming any other party are collected as
-`unqualifiedResponsibilityClaims`. They are **not** listed at the prompt: an
-operator cannot adjudicate unfamiliar DIDs on a startup screen, and printing
-them competes with the claim that does count. The prompt reports their count
-and writes the detail to a file. Failure to write that file never blocks
-startup.
+`unqualifiedResponsibilityClaims`. OMATrust is permissionless, so the operator
+may still trust one of those parties, and the prompt lists every claimant. Only
+the declared publisher is marked, and only its claim suppresses the warning:
+anyone can publish a claim, so letting any claim suppress it would let anyone
+suppress it. The declared publisher is listed first, which keeps it visible
+when the list is flooded or contains look-alike names.
 
 **Fails when:**
 - No verified responsibility claim exists for the artifact DID
@@ -206,8 +207,10 @@ and shares that response across both MPAS checks.
 3. `buildTrustReport` requests the backend's complete, verified artifact
    evidence once and rejects evidence from a different chain or EAS deployment
 4. Returns a trust report with pass/fail per check and human-readable reasons
-5. Adapter displays responsibility, cybersecurity, informational, and
-   linked-identifier evidence
+5. Adapter displays a short summary: every responsible party and every
+   security reviewer, the declared publisher and approved assessors marked,
+   and a count of other evidence. The operator can press `D` for the full
+   report.
 6. The prompt includes a warning only when neither primary signal exists or
    the lookup is unavailable
 7. If the operator confirms → load plugin; if operator rejects → skip plugin
@@ -216,75 +219,76 @@ and shares that response across both MPAS checks.
 
 ## 5. Operator Experience
 
-### Plugin with primary evidence (no warning)
+Each plugin gets a short summary, built by `formatTrustSummary()`. It answers
+the two questions the operator decides on: who claims responsibility for the
+plugin, and who reviewed its security. On a terminal the names are bold, unless
+`NO_COLOR` is set.
+
+- **Responsible parties** lists every party that claims the plugin, declared
+  publisher first. A `did:web` is shown as its domain; addresses and other long
+  identifiers are shortened.
+- **Security reviews** lists every party that published a cybersecurity
+  assessment, approved assessors first. A label from the backend is shown only
+  for an approved assessor; anyone else is named by identifier.
+- Each list shows at most 5 entries, then `+N more`.
+- Certifications, other attestations, linked identifiers, the did:artifact
+  and the independent-verification link are not in the summary. It ends with
+  "Press D to see all attestations."
+- Text from the backend is stripped of control and bidirectional-override
+  characters before it is printed, so a claim cannot rewrite the terminal.
+
+Answering `D` (either case) prints the full report (`formatTrustDetails()`): the artifact DID,
+content integrity, the declared publisher DID, every claim with its
+responsibility type, attester and verification basis, every attestation, and
+every linked identifier, then the link to verify the artifact independently at
+https://app.omatrust.org/verify with its did:artifact. The prompt then asks
+again.
+
+### Publisher and approved assessor vouch (no warning)
 
 ```
-Plugin: github-repo (did:artifact:bafk...)
-  Content integrity: verified (plugin content matches the configured did:artifact)
-  OMATrust information:
-    Declared publisher: did:web:publisher.example
-    Responsibility claim from that publisher: FOUND
-      - did:web:publisher.example; responsibility publisher, maintainer;
-        verified via proof, controller-authorization, authorization-window
-        Technical verification confirms the claim, but does not establish that
-        the responsible party is legitimate. Decide whether you trust that party.
-    Cybersecurity assessment: FOUND
-      - security-assessment; issuer OMA3 Security Lab; verified via approved-issuer
-    Linked identifiers (1):
-      - did:web:publisher.example; issuer did:web:publisher.example;
-        verified via proof, controller-authorization, authorization-window
-
-  [y/N] Would you like to use this plugin given the information shown?
+Plugin: github-repo
+  Responsible parties (2):
+    publisher.example  ✓ declared publisher
+    auditor.example
+  Security reviews (1):
+    OMA3 Security Lab  ✓ approved assessor
+  If you trust just one of the URLs you should use the plugin.
+  Press D to see all attestations.
+Use this plugin? (y/N, or D for details)
 ```
 
-### Untrusted plugin (interactive prompt)
+### Claimed only by other parties
 
 ```
-Plugin: sketchy-tool (did:artifact:bafk...)
-  Content integrity: verified (plugin content matches the configured did:artifact)
-  OMATrust information:
-    WARNING: No verified responsibility claim or cybersecurity assessment was found.
-    Declared publisher: did:web:publisher.example
-    Responsibility claim from that publisher: NOT FOUND
-    Cybersecurity assessment: NOT FOUND
-    Linked identifiers (1):
-      - did:web:unrecognized-publisher.example; issuer 0x1234...;
-        verified via proof, controller-authorization, authorization-window
-
-  [y/N] Would you like to use this plugin given the information shown?
+Plugin: sketchy-tool
+  WARNING: Neither the declared publisher nor an approved assessor has vouched for this plugin: no responsibility claim or cybersecurity assessment from either was found.
+  Responsible parties (7):
+    pub1isher.example
+    0x12ab…9f3c
+    spam0.example
+    spam1.example
+    spam2.example
+    +2 more (press D to see all)
+    No claim from the declared publisher, publisher.example
+  Security reviews: none found
+  If you trust just one of the URLs you should use the plugin.
+  Press D to see all attestations.
+Use this plugin? (y/N, or D for details)
 ```
 
-### Artifact claimed by someone other than the declared publisher
-
-```
-Plugin: sketchy-tool (did:artifact:bafk...)
-  Content integrity: verified (plugin content matches the configured did:artifact)
-  OMATrust information:
-    WARNING: No verified responsibility claim or cybersecurity assessment was found.
-    Declared publisher: did:web:publisher.example
-    Responsibility claim from that publisher: NOT FOUND
-    Claims naming a different responsible party: 2 (not counted as evidence)
-      Details written to /var/folders/../mpas-trust-a1b2c3/unqualified-responsibility-claims.json
-    Cybersecurity assessment: NOT FOUND
-    Linked identifiers (0):
-      - None found.
-
-  [y/N] Would you like to use this plugin given the information shown?
-```
-
-Before this binding existed, those two claims would have set
-`primaryEvidenceFound: true` and removed the warning entirely.
+Before claims were bound to the declared publisher, these claims would have
+set `primaryEvidenceFound: true` and removed the warning entirely.
 
 ### Network unreachable (graceful degradation)
 
 ```
-Plugin: github-repo (did:artifact:bafk...)
-  Content integrity: verified (plugin content matches the configured did:artifact)
+Plugin: github-repo
   WARNING: OMATrust information could not be loaded.
-  No OMATrust responsibility claims, attestations, linked identifiers, or
-  other legitimacy and provenance evidence was loaded.
-
-  [y/N] Would you like to use this plugin given the information shown?
+  Artifact trust API returned 502
+  No OMATrust responsibility claims, security reviews, linked identifiers, or other legitimacy and provenance evidence was loaded.
+  Press D to see all attestations.
+Use this plugin? (y/N, or D for details)
 ```
 
 ---
@@ -321,8 +325,8 @@ if (!confirmed) {
 
 If the API check is unavailable, the adapter reports the failure and prompts
 the operator with the degraded-mode message.
-The prompt is always shown so the operator can evaluate the responsible-party
-DID and other evidence; only the warning is conditional.
+The prompt is always shown so the operator can judge the responsible parties
+and other evidence; only the warning is conditional.
 
 ---
 
@@ -411,8 +415,9 @@ authentication material; that contract is outside this feature.
 - `canTrust()` function with two built-in checks (responsibility claim +
   approved-issuer cybersecurity assessment)
 - Display of all verified linked identifiers without a target-match verdict
-- Display and confirmation for every report so the operator can judge the
-  responsible party
+- A short summary for every report, listing every responsible party and
+  security reviewer, with the full report one keypress away, so the operator
+  can judge whom to trust
 - Warning only when both primary signals are absent or the lookup is
   unavailable; interactive confirmation for every plugin
 - Graceful degradation when network is unavailable
@@ -423,6 +428,8 @@ authentication material; that contract is outside this feature.
 **Out of scope (future):**
 - Configurable trust policy (operator-defined rules, thresholds)
 - Strict mode (auto-reject without prompting)
+- Operator or consortium lists of trusted publishers and assessors, so a
+  claim from a party the operator already trusts is marked as well
 - Non-interactive mode for CI (pre-approved plugin allowlists)
 - Runtime re-verification after initial load
 - Attestation caching

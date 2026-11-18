@@ -29,8 +29,8 @@ export interface AttestationCheckResult {
   /**
    * Verified claims naming some other responsibleParty. Anyone may attest a
    * responsibility claim against any artifact DID — the artifact does not
-   * authorize the attester — so these never satisfy the primary check and are
-   * not listed inline. They are surfaced as a count plus a file path.
+   * authorize the attester — so these never satisfy the primary check. The
+   * prompt still lists them, unmarked, because the operator may trust one.
    */
   unqualifiedResponsibilityClaims: AttestationSummary[];
   attestations: AttestationSummary[];

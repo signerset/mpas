@@ -2,10 +2,8 @@
 
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { PluginTrustReport } from "./trust.js";
+import type { AttestationSummary } from "./trust-attestation.js";
 import type { DeploymentConfig } from "./config-loader.js";
 
 export type PluginTrustAssessment =
@@ -18,138 +16,305 @@ export type ConfirmPluginUse = (
 ) => Promise<boolean>;
 
 export const NO_TRUST_CHECKS_WARNING =
-  "No OMATrust responsibility claims, attestations, linked identifiers, or other legitimacy and provenance evidence was loaded.";
+  "No OMATrust responsibility claims, security reviews, linked identifiers, or other legitimacy and provenance evidence was loaded.";
 export const NO_PRIMARY_TRUST_EVIDENCE_WARNING =
-  "No verified responsibility claim or cybersecurity assessment was found.";
+  "Neither the declared publisher nor an approved assessor has vouched for this plugin: no responsibility claim or cybersecurity assessment from either was found.";
 export const RESPONSIBILITY_CLAIM_TRUST_NOTICE =
-  "Technical verification confirms the claim, but does not establish that the responsible party is legitimate. Decide whether you trust that party.";
-export const UNQUALIFIED_CLAIMS_NOTICE =
-  "Anyone can attest a responsibility claim against any artifact, so claims from other parties are not counted as evidence.";
-
-/**
- * Writes the non-qualifying claims out rather than listing them at the prompt.
- * An operator cannot adjudicate a list of unfamiliar DIDs on a startup screen,
- * and printing them competes with the one claim that does count. Returns the
- * path, or undefined if it could not be written — a diagnostics file must
- * never block startup.
- */
-export function writeUnqualifiedClaims(
-  report: PluginTrustReport,
-): string | undefined {
-  const claims = report.attestation.unqualifiedResponsibilityClaims;
-  if (claims.length === 0) return undefined;
-  try {
-    const dir = mkdtempSync(join(tmpdir(), "mpas-trust-"));
-    const path = join(dir, "unqualified-responsibility-claims.json");
-    writeFileSync(
-      path,
-      JSON.stringify(
-        {
-          artifactDid: report.artifactDid,
-          declaredPublisherDid: report.publisherDid,
-          note: UNQUALIFIED_CLAIMS_NOTICE,
-          claims,
-        },
-        null,
-        2,
-      ) + "\n",
-      "utf-8",
-    );
-    return path;
-  } catch {
-    return undefined;
-  }
-}
+  "If you trust just one of the URLs you should use the plugin.";
+export const DETAILS_HINT = "Press D to see all attestations.";
 export const INDEPENDENT_VERIFY_NOTICE =
-  "You can independently verify this artifact at https://app.omatrust.org/verify using the did:artifact shown above.";
+  "You can independently verify this artifact at https://app.omatrust.org/verify using its did:artifact:";
+
+/** How many responsible parties or reviewers the summary lists before "+N more". */
+export const SUMMARY_LIST_LIMIT = 5;
+
+const SECURITY_ASSESSMENT = "security-assessment";
+
+/** Emphasis for the few facts the operator decides on. */
+export interface TrustTextStyle {
+  strong(text: string): string;
+  warning(text: string): string;
+}
+
+export const PLAIN_STYLE: TrustTextStyle = {
+  strong: (text) => text,
+  warning: (text) => text,
+};
+
+const ANSI_STYLE: TrustTextStyle = {
+  strong: (text) => `\x1b[1m${text}\x1b[22m`,
+  warning: (text) => `\x1b[1;33m${text}\x1b[0m`,
+};
+
+/** Bold and colour on a terminal, unless the operator set NO_COLOR. */
+export function terminalStyle(
+  isTTY: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): TrustTextStyle {
+  return isTTY && !env.NO_COLOR ? ANSI_STYLE : PLAIN_STYLE;
+}
 
 /**
- * Reports all available trust information and asks the operator to make the
- * final decision. The content hash has already been verified by the loader.
+ * Removes control characters from text that came from the trust backend.
+ * Claims are permissionless, so a claim could otherwise carry terminal escape
+ * sequences that rewrite or hide what the operator sees.
  */
-export const promptPluginUse: ConfirmPluginUse = async (assessment, config) => {
-  stdout.write(`\nPlugin: ${config.name}\n`);
-  stdout.write(`  Artifact: ${config.plugin.artifactDid}\n`);
-  stdout.write("  Content integrity: verified (plugin content matches the configured did:artifact)\n");
+export function sanitizeForTerminal(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "");
+}
+
+function shortenMiddle(text: string, head: number, tail: number): string {
+  return text.length <= head + tail + 1
+    ? text
+    : `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+/**
+ * A readable name for an identifier. A did:web is its domain (and path), which
+ * is the identifier itself rather than a label someone chose, so it is safe to
+ * show on its own. Addresses and long DIDs are shortened; the detail view
+ * shows them in full.
+ */
+export function displayIdentifier(identifier: string): string {
+  const clean = sanitizeForTerminal(identifier.trim());
+  if (clean.startsWith("did:web:")) {
+    const [host = "", ...path] = clean.slice("did:web:".length).split(":");
+    let decodedHost = host;
+    try {
+      decodedHost = decodeURIComponent(host);
+    } catch {
+      // Keep the encoded form; a malformed DID must not abort the prompt.
+    }
+    return sanitizeForTerminal([decodedHost, ...path].join("/"));
+  }
+  const address = /0x[0-9a-fA-F]{40}$/.exec(clean)?.[0];
+  if (address && (clean === address || clean.startsWith("did:pkh:"))) {
+    return shortenMiddle(address, 6, 4);
+  }
+  return shortenMiddle(clean, 28, 8);
+}
+
+export interface TrustListEntry {
+  /** The full identifier, shown in the detail view. */
+  identifier: string;
+  /** The readable name shown in the summary. */
+  name: string;
+  /** Set for the declared publisher or an approved assessor. */
+  mark?: string;
+}
+
+function responsiblePartyOf(claim: AttestationSummary): string {
+  return typeof claim.data.responsibleParty === "string"
+    ? claim.data.responsibleParty
+    : claim.attester;
+}
+
+/**
+ * Every party that claims responsibility for the artifact, declared publisher
+ * first. Claims are permissionless, so all of them are listed for the
+ * operator; only the declared publisher's claim is marked.
+ */
+export function listResponsibleParties(
+  report: PluginTrustReport,
+): TrustListEntry[] {
+  const entries = new Map<string, TrustListEntry>();
+  const add = (claim: AttestationSummary, mark?: string) => {
+    const identifier = responsiblePartyOf(claim);
+    if (entries.has(identifier)) return;
+    entries.set(identifier, {
+      identifier,
+      name: displayIdentifier(identifier),
+      ...(mark ? { mark } : {}),
+    });
+  };
+  for (const claim of report.attestation.responsibilityClaims) {
+    add(claim, "declared publisher");
+  }
+  for (const claim of report.attestation.unqualifiedResponsibilityClaims) {
+    add(claim);
+  }
+  return [...entries.values()];
+}
+
+/**
+ * Every party that published a cybersecurity assessment of the artifact,
+ * approved assessors first. A label is shown only for an approved assessor;
+ * anyone else is named by their identifier.
+ */
+export function listSecurityReviewers(
+  report: PluginTrustReport,
+): TrustListEntry[] {
+  const reviews = report.attestation.attestations.filter(
+    (item) => item.schemaLabel === SECURITY_ASSESSMENT,
+  );
+  const ordered = [
+    ...reviews.filter((item) => item.isApprovedIssuer),
+    ...reviews.filter((item) => !item.isApprovedIssuer),
+  ];
+  const entries = new Map<string, TrustListEntry>();
+  for (const review of ordered) {
+    if (entries.has(review.attester)) continue;
+    const label = review.isApprovedIssuer && review.attesterLabel
+      ? sanitizeForTerminal(review.attesterLabel)
+      : undefined;
+    entries.set(review.attester, {
+      identifier: review.attester,
+      name: label || displayIdentifier(review.attester),
+      ...(review.isApprovedIssuer ? { mark: "approved assessor" } : {}),
+    });
+  }
+  return [...entries.values()];
+}
+
+function formatList(
+  heading: string,
+  entries: TrustListEntry[],
+  style: TrustTextStyle,
+): string[] {
+  if (entries.length === 0) return [`  ${heading}: none found`];
+  const shown = entries.slice(0, SUMMARY_LIST_LIMIT);
+  const width = Math.max(...shown.map((entry) => entry.name.length));
+  const lines = [`  ${heading} (${entries.length}):`];
+  for (const entry of shown) {
+    lines.push(
+      entry.mark
+        ? `    ${style.strong(entry.name.padEnd(width))}  ✓ ${entry.mark}`
+        : `    ${entry.name}`,
+    );
+  }
+  if (entries.length > shown.length) {
+    lines.push(`    +${entries.length - shown.length} more (press D to see all)`);
+  }
+  return lines;
+}
+
+/**
+ * The short message shown for each plugin: who claims responsibility, who
+ * reviewed its security, and a warning when neither the declared publisher
+ * nor an approved assessor vouched for it. Everything else, including the
+ * did:artifact and the independent-verification link, is in the details.
+ */
+export function formatTrustSummary(
+  assessment: PluginTrustAssessment,
+  config: DeploymentConfig,
+  style: TrustTextStyle = PLAIN_STYLE,
+): string {
+  const lines = [`Plugin: ${style.strong(config.name)}`];
 
   if (assessment.status === "notChecked") {
-    stdout.write("\n  WARNING: OMATrust information could not be loaded.\n");
-    if (assessment.detail) stdout.write(`  ${assessment.detail}\n`);
-    stdout.write(`  ${NO_TRUST_CHECKS_WARNING}\n`);
+    lines.push(
+      `  ${style.warning("WARNING: OMATrust information could not be loaded.")}`,
+    );
+    if (assessment.detail) {
+      lines.push(`  ${sanitizeForTerminal(assessment.detail)}`);
+    }
+    lines.push(`  ${NO_TRUST_CHECKS_WARNING}`);
   } else {
     const { report } = assessment;
-    stdout.write("\n  OMATrust information:\n");
+    const parties = listResponsibleParties(report);
+    const reviewers = listSecurityReviewers(report);
+
     if (report.verdict.warningRequired) {
-      stdout.write(`  WARNING: ${NO_PRIMARY_TRUST_EVIDENCE_WARNING}\n`);
+      lines.push(`  ${style.warning(`WARNING: ${NO_PRIMARY_TRUST_EVIDENCE_WARNING}`)}`);
     }
-    stdout.write(`  Declared publisher: ${report.publisherDid}\n`);
-    stdout.write(
-      `  Responsibility claim from that publisher: ${report.attestation.responsibilityClaim ? "FOUND" : "NOT FOUND"}\n`,
-    );
-
-    for (const claim of report.attestation.responsibilityClaims) {
-      const responsibleParty = typeof claim.data.responsibleParty === "string"
-        ? claim.data.responsibleParty
-        : claim.attesterLabel ?? claim.attester;
-      const responsibilityTypes = Array.isArray(claim.data.responsibilityType)
-        ? claim.data.responsibilityType.filter(
-          (value): value is string => typeof value === "string",
-        )
-        : [];
-      const typeLabel = responsibilityTypes.length > 0
-        ? `; responsibility ${responsibilityTypes.join(", ")}`
-        : "";
-      stdout.write(
-        `    - ${responsibleParty}${typeLabel}; verified via ${claim.verificationBasis.join(", ")}\n`,
-      );
-      stdout.write(
-        `      ${RESPONSIBILITY_CLAIM_TRUST_NOTICE}\n`,
+    lines.push(...formatList("Responsible parties", parties, style));
+    if (!report.attestation.responsibilityClaim) {
+      lines.push(
+        `    No claim from the declared publisher, ${style.strong(displayIdentifier(report.publisherDid))}`,
       );
     }
+    lines.push(...formatList("Security reviews", reviewers, style));
 
-    const unqualifiedCount =
-      report.attestation.unqualifiedResponsibilityClaims.length;
-    if (unqualifiedCount > 0) {
-      const path = writeUnqualifiedClaims(report);
-      stdout.write(
-        `  Claims naming a different responsible party: ${unqualifiedCount} (not counted as evidence)\n`,
-      );
-      stdout.write(
-        path
-          ? `    Details written to ${path}\n`
-          : "    Details could not be written to disk.\n",
-      );
-    }
-
-    stdout.write(
-      `  Cybersecurity assessment: ${report.attestation.cybersecurityAssessment ? "FOUND" : "NOT FOUND"}\n`,
-    );
-
-    for (const attestation of report.attestation.attestations) {
-      const issuer = attestation.attesterLabel ?? attestation.attester;
-      const schema = attestation.schemaLabel ?? attestation.schemaUid;
-      const basis = attestation.verificationBasis.length > 0
-        ? attestation.verificationBasis.join(", ")
-        : "endpoint verification";
-      stdout.write(
-        `    - ${schema}; issuer ${issuer}; verified via ${basis}\n`,
-      );
-    }
-
-    stdout.write(`  Linked identifiers (${report.linkedIdentifiers.length}):\n`);
-    if (report.linkedIdentifiers.length === 0) {
-      stdout.write("    - None found.\n");
-    }
-    for (const linked of report.linkedIdentifiers) {
-      const issuer = linked.attesterLabel ?? linked.attester;
-      stdout.write(
-        `    - ${linked.linkedId}; issuer ${issuer}; verified via ${linked.verificationBasis.join(", ")}\n`,
-      );
+    if (parties.length > 0 || reviewers.length > 0) {
+      lines.push(`  ${RESPONSIBILITY_CLAIM_TRUST_NOTICE}`);
     }
   }
 
-  stdout.write(`  ${INDEPENDENT_VERIFY_NOTICE}\n`);
-  stdout.write("\n");
+  lines.push(`  ${DETAILS_HINT}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function basisText(basis: string[]): string {
+  return basis.length > 0
+    ? basis.map(sanitizeForTerminal).join(", ")
+    : "endpoint verification";
+}
+
+function claimDetail(claim: AttestationSummary): string {
+  const types = Array.isArray(claim.data.responsibilityType)
+    ? claim.data.responsibilityType.filter(
+      (value): value is string => typeof value === "string",
+    )
+    : [];
+  const typeText = types.length > 0
+    ? `; responsibility ${types.map(sanitizeForTerminal).join(", ")}`
+    : "";
+  return `    - ${sanitizeForTerminal(responsiblePartyOf(claim))}${typeText}; ` +
+    `attested by ${sanitizeForTerminal(claim.attester)}; verified via ${basisText(claim.verificationBasis)}`;
+}
+
+function attestationDetail(item: AttestationSummary): string {
+  const issuer = item.attesterLabel
+    ? `${sanitizeForTerminal(item.attesterLabel)} (${sanitizeForTerminal(item.attester)})`
+    : sanitizeForTerminal(item.attester);
+  const approved = item.isApprovedIssuer ? "; approved issuer" : "";
+  return `    - ${sanitizeForTerminal(item.schemaLabel || item.schemaUid)}; issuer ${issuer}${approved}; ` +
+    `verified via ${basisText(item.verificationBasis)}`;
+}
+
+/** Everything OMATrust returned, in full, for an operator who asks for it. */
+export function formatTrustDetails(
+  assessment: PluginTrustAssessment,
+  config: DeploymentConfig,
+): string {
+  const lines = [
+    `Details for ${config.name}`,
+    `  Artifact: ${config.plugin.artifactDid}`,
+    "  Content integrity: verified (plugin content matches the configured did:artifact)",
+  ];
+  const verify = [`  ${INDEPENDENT_VERIFY_NOTICE}`, `    ${config.plugin.artifactDid}`];
+  if (assessment.status === "notChecked") {
+    lines.push("  OMATrust information could not be loaded.", ...verify);
+    return `${lines.join("\n")}\n`;
+  }
+
+  const { report } = assessment;
+  const { attestation } = report;
+  lines.push(`  Declared publisher: ${sanitizeForTerminal(report.publisherDid)}`);
+  lines.push(
+    `  Responsibility claims from the declared publisher (${attestation.responsibilityClaims.length}):`,
+  );
+  for (const claim of attestation.responsibilityClaims) lines.push(claimDetail(claim));
+  lines.push(
+    `  Responsibility claims from other parties (${attestation.unqualifiedResponsibilityClaims.length}):`,
+  );
+  for (const claim of attestation.unqualifiedResponsibilityClaims) {
+    lines.push(claimDetail(claim));
+  }
+  lines.push(`  Attestations (${attestation.attestations.length}):`);
+  for (const item of attestation.attestations) lines.push(attestationDetail(item));
+  lines.push(`  Linked identifiers (${report.linkedIdentifiers.length}):`);
+  for (const linked of report.linkedIdentifiers) {
+    const issuer = linked.attesterLabel
+      ? `${sanitizeForTerminal(linked.attesterLabel)} (${sanitizeForTerminal(linked.attester)})`
+      : sanitizeForTerminal(linked.attester);
+    lines.push(
+      `    - ${sanitizeForTerminal(linked.linkedId)}; issuer ${issuer}; verified via ${basisText(linked.verificationBasis)}`,
+    );
+  }
+  lines.push(...verify);
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Shows the trust summary and asks the operator to decide. `d` (either case)
+ * prints the full detail and asks again. The content hash has already been verified by the
+ * loader.
+ */
+export const promptPluginUse: ConfirmPluginUse = async (assessment, config) => {
+  const style = terminalStyle(Boolean(stdout.isTTY));
+  stdout.write(`\n${formatTrustSummary(assessment, config, style)}`);
 
   if (!stdin.isTTY) {
     stdout.write("  Non-interactive input: declining plugin use by default.\n");
@@ -158,8 +323,16 @@ export const promptPluginUse: ConfirmPluginUse = async (assessment, config) => {
 
   const rl = createInterface({ input: stdin, output: stdout });
   try {
-    const answer = await rl.question("  [y/N] Would you like to use this plugin given the information shown? ");
-    return answer.trim().toLowerCase() === "y";
+    for (;;) {
+      const answer = (await rl.question("Use this plugin? (y/N, or D for details) "))
+        .trim()
+        .toLowerCase();
+      if (answer === "d") {
+        stdout.write(`\n${formatTrustDetails(assessment, config)}\n`);
+        continue;
+      }
+      return answer === "y";
+    }
   } finally {
     rl.close();
   }
