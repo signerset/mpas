@@ -1,7 +1,7 @@
 # MPAS Application Plugin Profile
 
 **Status:** Draft v0.2
-**Companion to:** MPAS Core Specification, MPAS HTTP Profile, and MPAS JSON Verifier Policy Profile  
+**Companion to:** MPAS Core Specification, MPAS HTTP Profile, MPAS JSON Verifier Policy Profile, and [MPAS Plugin Presentation Profile](./mpas-profile-plugin-presentation.md)  
 **Suggested filename:** `mpas-profile-application-plugin.md`  
 **Primary object:** `MpasApplicationPlugin`  
 **Scope:** A portable JSON descriptor for an application's MPAS-exposed command surface, including profile-native Execution Payload schemas and credential requirement classes.
@@ -34,7 +34,7 @@ This profile is intentionally small. It defines the common application-plugin de
 - credential requirement classes;
 - a normative rule for inferring native tool identity from the operation name under MCP.
 
-This profile does not define deployment activation, credential bindings, signer groups, approval requirements, approval thresholds, rendering templates, receipt mappings, OMATrust attestations, marketplace behavior, or plugin code packaging. Those concerns are left to implementations, the MPAS JSON Verifier Policy Profile, or future profiles.
+This profile does not define deployment activation, credential bindings, signer groups, approval requirements, approval thresholds, screen layout, receipt mappings, OMATrust attestations, marketplace behavior, or plugin code packaging. Plugin schema version 2 does define declarative display metadata (§8.1). The other concerns are left to implementations, the MPAS JSON Verifier Policy Profile, or future profiles.
 
 ---
 
@@ -50,6 +50,8 @@ This profile defines:
 - an operation catalog keyed by operation name;
 - operation-level profile-native Execution Payload schemas;
 - optional operation-level impact metadata;
+- optional operation-level maintainer presentation on plugin schema version 2, rendered as defined by the [MPAS Plugin Presentation Profile](./mpas-profile-plugin-presentation.md);
+- the operations a plugin governs by default (§8.2);
 - credential requirement class descriptors;
 - security requirements for plugin consumers;
 - a JSON Schema appendix for structural validation.
@@ -62,7 +64,7 @@ This profile does not define:
 - real credential references, vault handles, API keys, OAuth tokens, private keys, or local secret storage;
 - signer groups, signer thresholds, approval requirements, or organization-specific policy decisions;
 - policy match conditions or approval requirement expressions;
-- rendering or clear-signing UI templates;
+- screen layout, navigation, or approve-button placement. Plugin schema version 2 defines declarative display metadata (§8.1); the Plugin Presentation Profile defines how reviewer clients interpret it;
 - receipt mapping rules;
 - OMATrust attestation schemas;
 - plugin marketplaces;
@@ -135,7 +137,7 @@ This profile is designed to be generic enough for future execution profiles such
 
 An `MpasApplicationPlugin` is a portable descriptor of an application's MPAS-exposed commands.
 
-It is not a deployment store. It does not say which operations are enabled for a particular user, which real credentials are bound, which signer groups are used, or which thresholds apply. Those decisions belong to the consuming system.
+It is not a deployment store. It does not say which operations are enabled for a particular user, which real credentials are bound, which signer groups are used, or which thresholds apply. Those decisions belong to the consuming system. It does, together with deployment policy, determine which operations enter policy evaluation (§8.2).
 
 ### 4.1 Plugin vs. Deployment State
 
@@ -145,7 +147,8 @@ The plugin describes:
 - these operations use this execution profile and payload format;
 - these payload schemas are expected;
 - these credential classes may be required;
-- these operations carry these impact labels (informational).
+- these operations carry these impact labels (informational);
+- these operations are governed by default, and these are described but not governed by default (§8.2).
 
 The consuming system stores:
 
@@ -253,7 +256,7 @@ Field definitions:
 
 | Field                      | Required    | Description                                                                                                           |
 | :------------------------- | :---------: | :-------------------------------------------------------------------------------------------------------------------- |
-| `version`                  | Yes         | Plugin schema version. For this profile, MUST be `"1"`.                                                               |
+| `version`                  | Yes         | Plugin schema version. MUST be `"1"` or `"2"`. Version 2 adds optional operation `display` (§8.1) and `governedByDefault` (§8.2). A version 1 document MUST NOT contain either. |
 | `type`                     | Yes         | MUST be `"MpasApplicationPlugin"`.                                                                                    |
 | `pluginDid`                | Yes         | Stable DID for the plugin line. Used for discovery, update relationships, and publisher-level reputation. Not the artifact identity (see §6.5). |
 | `pluginVersion`            | Yes         | Version of this plugin document. Semantic versioning is RECOMMENDED but not required.                                 |
@@ -310,7 +313,8 @@ The `artifactDid` is the content-addressed identity of a specific plugin artifac
 - integrity verification on install and load;
 - security attestations and cybersecurity reviews;
 - OMATrust reputation scores and community reviews;
-- per-version trust decisions in deployment configurations.
+- per-version trust decisions in deployment configurations;
+- the `reviewArtifact` a Maintainer's Approval names, which the Verifier compares with the plugin it loaded (§13.2).
 
 In contrast, `pluginDid` (§6.1) identifies the plugin line across versions. Both are needed: `pluginDid` for discovery and update tracking, `artifactDid` for verifiable trust in specific artifacts.
 
@@ -334,7 +338,9 @@ so unchanged generation artifacts remain deterministic.
 
 The hash object MUST use `alg: "sha-256"` and a canonical 32-byte base64url value.
 The plugin artifact DID covers this declaration, so updating it requires the normal
-artifact/attestation migration. This attests the publisher's declared surface;
+artifact/attestation migration. The plugin and the bridge generated from the same
+captured surface are released together, and reviewer clients use the same artifact
+as the Verifier (Plugin Presentation Profile §3). This attests the publisher's declared surface;
 it does not authenticate a live server or prove its implementation safe.
 See MCP profile §5 for routing and HTTP profile §6.3 for bridge synchronization.
 
@@ -373,7 +379,7 @@ A plugin MUST NOT cause a Credential Adapter to accept an arbitrary execution pr
 
 ## 8. Operations
 
-The `operations` object describes the MPAS-exposed operations supported by this plugin. Each property key is the operation name; the value is an operation descriptor object.
+The `operations` object describes the operations the publisher documents for this plugin. Each property key is the operation name; the value is an operation descriptor object. A described operation is governed by default unless it sets `governedByDefault: false` (§8.2).
 
 For the `mcp.toolsCall` execution profile, the operation key MUST equal the native MCP tool name exactly as exposed by the target MCP server (e.g., `merge_pull_request`, not `github.merge_pull_request`). Disambiguation across applications is provided by `actionEnvelope.target.applicationDid`; the operation key MUST NOT carry a namespace prefix for that purpose. For other execution profiles, the operation key MUST be the native identifier as defined by that profile.
 
@@ -403,10 +409,38 @@ Field definitions for an operation descriptor object:
 | `description`            | Recommended | Human-readable description. Non-authoritative.                                     |
 | `impact`                 | Optional    | Publisher's assessment of the operation's impact level, such as `low`, `medium`, `high`, or `critical`. Informational only — does not define or constrain policy. A Credential Adapter or policy tool MAY use impact metadata to guide an operator during policy authoring. |
 | `executionPayloadSchema` | Yes         | JSON Schema describing valid profile-native Execution Payloads for this operation. |
+| `governedByDefault`      | Version 2   | Optional boolean. `false` marks an operation the publisher describes but does not govern by default (§8.2). Absent means `true`. Forbidden on version 1. |
+| `display`                | Version 2   | Optional maintainer presentation for this operation (§8.1). Forbidden on version 1. It does not change payload validation or approval policy. |
 
 For the `mcp.toolsCall` format, no separate native binding descriptor is required — the operation key is sufficient.
 
-The operation object does not define deployment policy. It does not enable the operation for any particular deployment. It does not bind real credentials. It does not prescribe approval requirements.
+The operation object does not define deployment policy. It does not enable the operation for any particular deployment. It does not bind real credentials. It does not prescribe approval requirements. Its presence in `operations`, and its `governedByDefault` value, do help determine whether the operation enters policy evaluation (§8.2).
+
+### 8.1 Maintainer presentation
+
+Plugin schema version 2 MAY add `display` to an operation. Version 1 consumers MUST reject a version 2 document. A version 2 document MAY omit `display`; review then uses the operation description and the payload.
+
+`display` applies to execution profiles whose payload is a JSON value validated by `executionPayloadSchema`. It is not a format for blockchain transactions, which use their own standards (for Ethereum, ERC-7730).
+
+`display` contains a nonempty `title`, an ordered `fields` array, and optional `description`, `interpolatedTitle`, and `links`. Each field has a `path`, an absolute JSON Pointer into the execution payload, and optional `title`, `description`, `format` (`raw`, `enum`, or `date`), and `params`. Enum values and links also use `title` and `description`. Every `title` and `description` inside `display` is the reviewer's version of the generic property with the same name, and replaces it for reviewers. Unknown display properties are invalid. Display text and formatters do not change the execution schema, the hashed payload, routing, or the approval decision.
+
+The [MPAS Plugin Presentation Profile](./mpas-profile-plugin-presentation.md) is normative for `display`: artifact selection and release binding, client-owned review context, pointer resolution, formatting, interpolation, coverage of values not displayed, links, fallbacks, validation, resource limits, and review records. Appendix A gives the structural schema.
+
+### 8.2 Governance default
+
+A plugin can treat each tool on its surface in one of three ways:
+
+| Kind | In `operations` | `governedByDefault` | `display` |
+| :--- | :--- | :--- | :--- |
+| Governed | Yes | Absent or `true` | Recommended |
+| Not governed by default, but an operator may choose to govern it | Yes | `false` | Recommended |
+| Never expected to be governed | No; listed only in `toolSurface.toolNames` (§6.3) | Not applicable | None |
+
+Describing an operation that is not governed by default gives an operator who chooses to govern it both payload validation and reviewer explanations. The Verifier's routing rule is defined by the execution profile; for MCP see the MCP Execution Profile §5 step 2. Governance is stated explicitly rather than inferred from which properties an operation has. Changing the presentation of an operation already in `operations` does not change its routing. Adding an operation to `operations` governs it by default, unless it sets `governedByDefault: false`.
+
+**Governance role.** Approval requirements, signer groups, and thresholds remain deployment policy, outside the plugin. But operation membership and `governedByDefault`, together with the operations deployment policy names, determine which operations enter policy evaluation. An operation that is not governed passes through: it skips approval-policy evaluation, including the deployment's `defaultRequirement` (JSON Verifier Policy Profile §4.5). It still undergoes the Action's integrity checks, proposer authorization (JSON Verifier Policy Profile §4.6), the tool-surface check, and, when the plugin describes the operation, payload validation against its schema.
+
+Because a plugin update can therefore change which operations are governed, a plugin release SHOULD state its changes to the default governed set: operations added to or removed from `operations`, and changes to `governedByDefault`. Operators who review the plugin file directly, or with an assistant, see the change there. Tooling that installs or updates a plugin MUST show the operator any change to the effective governed set (given the deployment's policy) as part of the existing artifact-acceptance step. This is not a separate approval process.
 
 ---
 
@@ -549,14 +583,24 @@ When evaluating an Action Package, a consumer using this plugin SHOULD:
 2. verify that `actionEnvelope.target.applicationDid` matches the plugin `applicationDid`;
 3. verify that `actionEnvelope.executionProfile.id` matches the plugin `executionProfile.id`;
 4. if both formats are present, verify that `actionEnvelope.executionProfile.format` matches the plugin `executionProfile.format`;
-5. look up the operation key in the `operations` object and validate the Execution Payload against its `executionPayloadSchema`;
-6. use local deployment policy to determine whether the operation is enabled and which credentials, if any, may be used.
+5. look up the operation key in the `operations` object and, when the plugin describes the operation, validate the Execution Payload against its `executionPayloadSchema`;
+6. ignore any Approval that names a `reviewArtifact` other than this plugin's `artifactDid`, except that such a Proposer Approval rejects the Action Package (below);
+7. determine whether the operation is governed (§8.2) and, if it is, evaluate local deployment policy with the remaining Approvals;
+8. use local deployment configuration to determine whether the operation is enabled and which credentials, if any, may be used.
+
+An Approval whose signed payload names a `reviewArtifact` (Core §5.5.5.1) declares the plugin artifact its reviewer used. A Verifier using this plugin MUST NOT count an Approval that names a `reviewArtifact` other than the `artifactDid` of the plugin it loaded for the Action's application DID. It treats that Approval as one that failed verification (Core §5.5.7), including the rule that a failed Proposer Approval rejects the Action Package, and reports it in `ignoredApprovals` (HTTP Profile §6.4.3) with code `REVIEW_ARTIFACT_MISMATCH` and a `reviewArtifact` member set to its own `artifactDid`.
+
+The guarantee is narrow: an Approval that declares plugin artifact X cannot count when the Verifier uses artifact Y. It does not guarantee that every Approval was made using a plugin; an Approval without `reviewArtifact` is evaluated as before, and generic review is governed by the Plugin Presentation Profile §3.2.
+
+A Verifier using this plugin SHOULD send its `artifactDid` as the non-authoritative `expectedReviewArtifact` hint with `additionalApprovalsRequired` (HTTP Profile §6.4). The comparison above remains authoritative.
+
+If a deployment changes its plugin artifact while Approvals are being collected, Approvals declaring the earlier artifact stop counting. If the remaining Approvals fall short, the Action restarts as a new Action (Core §6.7.3), and its reviewers approve again.
 
 ### 13.3 Policy Authoring
 
 A policy authoring tool MAY use the plugin's operation catalog and impact metadata to help an operator generate draft `MpasApplicationPolicy` entries.
 
-The generated policy MUST be reviewed and accepted by the operator before it becomes active. The plugin does not contain policy and MUST NOT be used to authorize or block an Action.
+The generated policy MUST be reviewed and accepted by the operator before it becomes active. The plugin does not contain approval policy and MUST NOT be used as an approval decision. Its operation membership and `governedByDefault` determine only whether an operation enters policy evaluation (§8.2).
 
 ### 13.4 Credential Adapter Use
 
@@ -566,6 +610,7 @@ A Credential Adapter MAY use an application plugin to:
 - identify the native MCP tool from the operation key;
 - inform an administrator which credential classes are needed;
 - present impact metadata during policy authoring;
+- determine, with deployment policy, which operations are governed (§8.2);
 - reject unsupported or malformed payloads.
 
 A Credential Adapter MUST still use trusted local or cloud configuration to decide:
@@ -586,6 +631,8 @@ A Credential Adapter MUST still use trusted local or cloud configuration to deci
 A plugin document is a descriptor. It is not deployment policy and is not proof that an action is safe.
 
 Credential requirements are descriptive. Operation descriptions are non-authoritative. Impact labels are informational. A Verifier or Credential Adapter MUST rely on trusted deployment policy before executing an Action.
+
+Operation membership and `governedByDefault` are the exception that matters for security: they decide which operations reach policy evaluation, and an ungoverned operation executes without Approvals beyond the Proposer's required Approval (§8.2). An operator accepting a plugin, or an update to one, is therefore also accepting its governed set.
 
 ### 14.2 No Secrets in Plugins
 
@@ -828,7 +875,7 @@ Future documents or versions may define:
   - `browser.recipe` and `desktop.recipe` bindings;
 - per-operation credential requirements (if future use cases require credential differentiation at the operation level);
 - plugin activation or deployment configuration;
-- rendering and clear-review descriptors;
+- per-element display templates, localization, and cryptographic binding of the review screen;
 - receipt mappings;
 - OMATrust attestations and trust scoring for plugins;
 - `did:artifact` distribution and lockfile formats;
@@ -943,7 +990,7 @@ This appendix provides an initial JSON Schema for structural validation. The sch
       }
     },
     "version": {
-      "const": "1"
+      "enum": ["1", "2"]
     },
     "type": {
       "const": "MpasApplicationPlugin"
@@ -998,6 +1045,28 @@ This appendix provides an initial JSON Schema for structural validation. The sch
     }
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "version": { "const": "1" } },
+        "required": ["version"]
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "additionalProperties": {
+              "not": {
+                "anyOf": [
+                  { "required": ["display"] },
+                  { "required": ["governedByDefault"] }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "operation": {
       "type": "object",
@@ -1011,9 +1080,59 @@ This appendix provides an initial JSON Schema for structural validation. The sch
         },
         "executionPayloadSchema": {
           "type": "object"
+        },
+        "governedByDefault": {
+          "type": "boolean"
+        },
+        "display": {
+          "$ref": "#/$defs/operationDisplay"
         }
       },
       "additionalProperties": false
+    },
+    "operationDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "fields"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "interpolatedTitle": { "type": "string", "minLength": 1 },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/displayField" }
+        },
+        "links": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/displayLink" }
+        }
+      }
+    },
+    "displayField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(/[\\s\\S]*)?$" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "format": { "enum": ["raw", "enum", "date"] },
+        "params": { "type": "object" }
+      }
+    },
+    "displayLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "urlTemplate"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "urlTemplate": { "type": "string", "minLength": 1 },
+        "variables": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      }
     },
     "credentialRequirement": {
       "type": "object",

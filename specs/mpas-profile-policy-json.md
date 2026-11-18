@@ -129,7 +129,7 @@ selects a single-party default by deliberately authoring `proposerOnly`.
 
 The default requirement MUST NOT be used to execute an unknown, unsupported, or malformed action. Operation support and payload validation are determined by the Verifier under the declared execution profile, not by the absence of a matching policy.
 
-**Scope — governed operations only.** `defaultRequirement` is the baseline for *governed* operations: those present in the Application Plugin or named by a policy entry. It does not apply to operations a deployment routes as pass-through (see the MCP Execution Profile §5 step 2): a pass-through operation executes on the Proposer's verified signature alone, after proposer gating (4.6), with no schema validation and no policy evaluation. This is the plugin-anchored trust model: the plugin publisher defines the governed surface, and `defaultRequirement` is the operator's baseline within it. Operators who instead require every conceivable operation to be governed should enumerate all operations in the plugin/policy or configure their deployment to deny pass-through routing (a hardening option, not the default).
+**Scope — governed operations only.** `defaultRequirement` is the baseline for *governed* operations: those the Application Plugin governs by default (listed in `operations` without `governedByDefault: false`) or that a policy entry names. It does not apply to operations a deployment routes as pass-through (see the MCP Execution Profile §5 step 2): a pass-through operation executes on the Proposer's verified signature alone, after proposer gating (4.6), with no policy evaluation, and with no schema validation unless the plugin describes it. This is the plugin-anchored trust model: the plugin publisher defines the governed surface, and `defaultRequirement` is the operator's baseline within it. Operators who instead require every conceivable operation to be governed should enumerate all operations in the plugin/policy or configure their deployment to deny pass-through routing (a hardening option, not the default).
 
 ### 4.6 Proposer Gating
 
@@ -454,6 +454,10 @@ Exactly one of `eligibleSignerGroup` or `eligibleSigners` SHOULD be present. If 
 }
 ```
 
+#### 5.5.5 Limits
+
+Authorization Requirements are bounded by MPAS Core §5.8.5: at most four levels of arrays and at most 32 thresholds. A Verifier MUST refuse to load a policy if, for any action key, combining all of that key's requirement entries with `allOf` would produce Authorization Requirements beyond those limits when mapped as in Section 7.7. It applies the same check to `defaultRequirement` on its own. Checking every entry under a key together covers every combination of entries that can match at once.
+
 ### 5.6 Signer Groups
 
 Signer groups define named sets of eligible Signers. Each group is a JSON object property whose value is an array of Signer DIDs.
@@ -528,7 +532,7 @@ Since policies are keyed by action name, there is at most one key per action. Mu
 
 ### 6.5 Approval Counting
 
-A Verifier MUST verify an Approval before counting it toward any requirement. Verification includes core MPAS Approval verification and any key authorization or external approval validation required by policy.
+A Verifier MUST verify an Approval before counting it toward any requirement. Verification includes core MPAS Approval verification and any key authorization or external approval validation required by policy. An Approval that fails verification is ignored and reported (Core §5.5.7). Verified Approvals are counted, or treated as conflicting, under this section using the decisions in the submitted bundle.
 
 For threshold requirements:
 
@@ -610,6 +614,9 @@ When the Verifier returns `additionalApprovalsRequired`, it SHOULD produce an Au
 For this profile:
 
 - Authorization Requirements MUST bind to the computed `actionEnvelopeHash`;
+- Authorization Requirements MUST describe the complete combined requirement for the action (Section 7.4), including thresholds the submitted Approvals already meet, because the replacement Action needs fresh Approvals for all of them (Core §5.8.1);
+- the Verifier maps the combined requirement to `approvalRequirements` (Core §5.8.5) without losing structure: a root `anyOf` or `allOf` becomes the top-level array of the same name, and a single root threshold becomes a one-item `anyOf`. Nested `allOf` and `anyOf` expressions become requirement groups, and a group of the same kind as the array containing it MAY be merged into that array;
+- `proposerOnly` means no approvals beyond the Proposer's required Approval. Before mapping, the Verifier simplifies the combined requirement accordingly: in `allOf`, a `proposerOnly` child adds nothing; in `anyOf`, a `proposerOnly` child satisfies the whole group, so the group adds nothing; and the simplification propagates through enclosing groups. For example, `(proposerOnly or A) and B` advertises only `B`, never `A and B`. If the whole requirement simplifies away, the policy is already satisfied. The Verifier does not simplify away requirements that Approvals in the submitted bundle already meet, because a replacement Action needs fresh Approvals for them;
 - threshold requirements referring to `eligibleSignerGroup` MUST be expanded into concrete eligible Signer DIDs or represented through a future extension recognized by the relying participants;
 - Authorization Requirements are not a guarantee of later execution;
 - the returned requirements are advisory feedback for the submitted Action and are not Coordination input for a different Action until the Proposer creates a new requirements object bound to that replacement Action;
@@ -938,10 +945,10 @@ A Verifier conforming to this profile MUST:
 - combine matching positive requirements with logical AND;
 - apply `defaultRequirement` for governed operations with no matching policy entry;
 - support the condition operators defined in Section 5.4;
-- support the requirement types defined in Section 5.5;
+- support the requirement types defined in Section 5.5, and refuse policies that exceed the limits in Section 5.5.5;
 - verify Approvals before counting them;
 - expand signer groups into eligible Signers when producing Authorization Requirements;
-- produce MPAS-compatible results and Authorization Requirements;
+- produce MPAS-compatible results and Authorization Requirements, including requirement groups where the policy needs them (Section 7.7);
 - not rely on nondeterministic LLM output for final authorization.
 
 ## 10. Future Work

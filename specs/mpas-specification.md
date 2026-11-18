@@ -2,7 +2,8 @@
 
 ## Overview and Architecture
 
-**Status:** Draft v0.3
+**Status:** Draft v0.4
+**Revision v0.4:** Adds the optional `reviewArtifact` member of the Canonical Approval Payload (Sections 5.5.5.1 and 5.5.7). Has the Verifier ignore and report an Approval that fails verification instead of rejecting the Action Package; a Proposer Approval that fails verification and a structurally invalid Approval Bundle still reject it (Sections 5.5.7, 5.6.4, and 6.2). Requires Authorization Requirements returned by a Verifier to describe the complete requirement, not only the unmet part (Section 5.8.1). Adds requirement groups, recursive evaluation semantics, and depth and size limits to Approval Requirements (Section 5.8.5 and Appendix A). Protocol objects keep `version: "1"`. A Verifier that predates v0.4 rejects an Approval payload containing `reviewArtifact`, and a reader that predates v0.4 rejects requirement groups.
 **Revision v0.3:** Clarifies Section 6.9.2 rule 3. A submission of an Action that is already executing joins that dispatch and receives its outcome, rather than a `pending` response.
 **Intended venue:** MSF Economy and Trust Working Group / OMA3
 **Scope:** Multi-party approval and execution of high-impact digital actions across Web2, Web3, AI agents, cloud infrastructure, local applications, and future digital environments
@@ -669,6 +670,11 @@ The Canonical Approval Payload is the signed payload for a Signature Approval. A
 | `signerDid`          | Conditional | DID of the Signer. REQUIRED when policy evaluates signer identity by DID. MAY be omitted when the signature format directly identifies the Signer authority. |
 | `createdAt`          | Yes         | Timestamp when the Approval was created. MUST be an RFC 3339 / ISO 8601 UTC timestamp string.                                                                |
 | `expiresAt`          | Optional    | Timestamp after which the Approval should no longer be accepted.                                                                                             |
+| `reviewArtifact`     | Optional    | DID that content-addresses the Application metadata the Signer used to review the Action, such as the `did:artifact` of an Application Plugin. See Section 5.5.7. |
+
+A Signer that reviewed the Action with content-addressed Application metadata SHOULD include `reviewArtifact`. If the Verifier uses different metadata, it rejects that Approval, which then does not count toward policy (Section 5.5.7). The top-level Approval does not repeat `reviewArtifact`. Its absence means the Signer declares no such metadata; it is not evidence of how the Signer reviewed.
+
+A Verifier that predates `reviewArtifact` rejects a payload containing it as an unknown member. Deployments therefore upgrade Verifiers before Signers include it.
 
 ##### 5.5.5.2 Signature Object Fields
 
@@ -740,7 +746,15 @@ A Verifier MUST reject an Approval if:
 * the signature cannot be verified;
 * the signing key is not authorized for the Signer or approval role claimed;
 * the Approval has expired;
-* the Approval does not satisfy the Verifier's applicable policy.
+* the signed payload contains `reviewArtifact`, and it is not the identifier of the content-addressed Application metadata the Verifier uses for `actionEnvelope.target.applicationDid`, or the Verifier uses no such metadata for that Application.
+
+These are verification failures. A verified Approval that does not count toward policy, for example one from a Signer outside every applicable threshold, has not failed verification; policy simply does not count it.
+
+An Approval rejected under these rules is ignored: it does not count toward policy, and the Verifier evaluates policy with the remaining verified Approvals (Section 6.2.2, Steps 9 and 10). The Verifier reports each ignored Approval in its response, whatever the result, including when the Action executes using other Approvals (Section 6.2.3). Ignoring an Approval does not relax any other rule:
+
+* a Proposer Approval that fails verification rejects the Action Package;
+* a structurally invalid Approval Bundle rejects the Action Package (Section 5.6.4);
+* verified decisions that block, conflict, or override under the applicable policy, including contradictory verified decisions from one Signer, keep their policy semantics (Section 5.6.4).
 
 ### 5.6 Approval Bundle
 
@@ -769,13 +783,12 @@ Each Approval in the `approvals` array MUST bind to the same Action Envelope as 
 
 #### 5.6.4 Verification Notes
 
-A Verifier MUST reject an Approval Bundle if:
+A Verifier MUST reject an Approval Bundle as malformed if:
 
 * `actionEnvelopeHash` does not match the hash of the Action Envelope in the Action Package;
-* any Approval in the bundle binds to a different Action Envelope;
-* any Approval required by policy cannot be verified;
-* the bundle omits Approvals required by policy;
-* the bundle includes conflicting or disqualifying Approvals under the applicable policy.
+* any Approval in the bundle binds to a different Action Envelope.
+
+An individual Approval that cannot be verified is ignored and reported rather than fatal to the bundle, except the Proposer's Approval (Section 5.5.7). If the verified Approvals do not include the Approvals policy requires, the Verifier responds with `additionalApprovalsRequired`. If the bundle includes verified Approvals that the applicable policy treats as conflicting or disqualifying, the Verifier rejects the Action Package.
 
 ### 5.7 Action Package
 
@@ -887,9 +900,9 @@ A Verifier MUST reject an Action Package if:
 
 #### 5.8.1 Purpose
 
-**Authorization Requirements** describe what additional approvals or authorization conditions are expected for one Action Envelope. The same object type has two uses:
+**Authorization Requirements** describe what approvals or authorization conditions are expected for one Action Envelope. The same object type has two uses:
 
-* A Verifier SHOULD return Authorization Requirements as advisory policy feedback after receiving an Action Package that lacks sufficient Approvals. Those requirements bind to the submitted Action Envelope.
+* A Verifier SHOULD return Authorization Requirements as advisory policy feedback after receiving an Action Package that lacks sufficient Approvals. Those requirements bind to the submitted Action Envelope. They describe the complete approval requirement that current policy applies to the Action, including parts the submitted Approvals already meet, not only the part left unmet: the Proposer collects Approvals for a replacement Action, which needs every Approval again (Section 6.7.3). A requirement that the Proposer's own Approval satisfies needs no entry, and an alternative that the Proposer's Approval satisfies makes its whole group need none; the JSON Verifier Policy Profile §7.7 defines this simplification for its `proposerOnly` rule. Requirements met by other Approvals in the submitted bundle are not simplified away.
 * A Proposer MAY author Authorization Requirements as input to an approval-coordination workflow. Those requirements bind to the replacement Action Envelope whose Approvals the workflow will collect.
 
 An Authorization Requirements object does not identify its author and is not, by itself, proof that the named Verifier produced or endorsed it. Transport authentication or an enclosing signed message may establish provenance for a particular exchange, but that provenance is not portable merely because the object is later forwarded. The `verifier.did` field identifies the Verifier whose anticipated policy the requirements are intended to satisfy.
@@ -951,11 +964,68 @@ The `approvalRequirements` object describes approval paths that may satisfy poli
 
 | Field           | Required    | Description                                                                                  |
 | :-------------- | :---------: | :------------------------------------------------------------------------------------------- |
-| anyOf           | Recommended | Array of alternative approval paths. If any path is satisfied, the Action may be authorized. |
-| allOf           | Optional    | Array of approval paths that must all be satisfied.                                          |
+| anyOf           | Recommended | Array of alternatives. The requirements need at least one of them satisfied.                 |
+| allOf           | Optional    | Array of items that must all be satisfied.                                                   |
 | overrideSigners | Optional    | Signers with privileged authority to approve or reject outside ordinary threshold paths.     |
 
 At least one of `anyOf`, `allOf`, or `overrideSigners` SHOULD be present when result is `additionalApprovalsRequired`.
+
+**Evaluation.** The same AND/OR semantics apply at every level, recursively, both to whether the requirements are satisfied and to whether they remain achievable with the eligible Signers who have not yet decided:
+
+* a threshold is satisfied when enough eligible Signers have given its decision, and achievable while those Signers plus the undecided eligible Signers could still reach it;
+* an `allOf` list or group is satisfied when every item is satisfied, and achievable while every item is achievable;
+* an `anyOf` list or group is satisfied when at least one item is satisfied, and achievable while at least one item is achievable. An item that becomes unachievable does not make the group unachievable while another item remains achievable;
+* at the top level, both lists apply: at least one `anyOf` item and every `allOf` item. An absent list imposes no condition.
+
+Override Signers keep their existing behavior (Section 5.8.7). An `approve` decision from an override Signer with `approve` permission satisfies the requirements. A `reject` decision from an override Signer with `reject` permission makes them unachievable. An override Signer with `approve` permission who has not yet decided keeps otherwise unachievable requirements achievable.
+
+This evaluation serves coordination. The Verifier still evaluates its policy authoritatively.
+
+Each item in `anyOf`, `allOf`, or a nested group is either a Threshold Requirement (Section 5.8.6) or a **requirement group**:
+
+| Field        | Required | Description                                                                             |
+| :----------- | :------: | :-------------------------------------------------------------------------------------- |
+| type         | Yes      | `anyOf` (at least one item satisfied) or `allOf` (every item satisfied).                |
+| requirements | Yes      | Non-empty array of items, each a Threshold Requirement or a requirement group.           |
+| description  | Optional | Human-readable explanation of the group.                                                |
+
+Requirement groups express policies whose alternatives each need more than one threshold, or that combine independent choices. For example, "two engineers and one security reviewer, or two of three directors":
+
+```json
+{
+  "anyOf": [
+    {
+      "type": "allOf",
+      "requirements": [
+        {
+          "type": "threshold",
+          "threshold": 2,
+          "eligibleSigners": ["did:web:eng1.example", "did:web:eng2.example", "did:web:eng3.example"]
+        },
+        {
+          "type": "threshold",
+          "threshold": 1,
+          "eligibleSigners": ["did:web:sec1.example", "did:web:sec2.example"]
+        }
+      ]
+    },
+    {
+      "type": "threshold",
+      "threshold": 2,
+      "eligibleSigners": ["did:web:dir1.example", "did:web:dir2.example", "did:web:dir3.example"]
+    }
+  ]
+}
+```
+
+**Limits.** Approval requirements are bounded so that every reader can process them safely, including readers that receive them from a Proposer:
+
+* **Depth:** the top-level `anyOf` and `allOf` arrays are at depth 1. The `requirements` array of a group listed in an array at depth *n* is at depth *n* + 1. No array may be deeper than 4.
+* **Size:** the whole `approvalRequirements` object contains at most 32 Threshold Requirements.
+
+A producer MUST NOT emit approval requirements that exceed these limits. A reader MUST reject approval requirements that exceed them before evaluating them; it MUST NOT truncate them.
+
+A producer SHOULD use requirement groups only when the requirement cannot be expressed without them, so that requirements expressible without groups keep the same form as before groups existed. Readers that predate requirement groups reject them as unknown structure. Whether groups are needed depends on the final combined requirements, not on whether each policy entry looks flat: two flat policy entries that each offer alternatives combine into requirements that need groups.
 
 #### 5.8.6 Threshold Requirement
 
@@ -1165,7 +1235,7 @@ Select the Approvals that could affect policy evaluation. Candidate selection us
 
 **Step 9: Verify Candidate Approvals**
 
-Verify each candidate Approval needed to satisfy, block, or override policy. Verify the signature, confirm the signed payload binds to the computed Action Envelope hash, confirm the signing key is authorized for the claimed Signer identity (see Section 7.8), and confirm the Approval's `createdAt` is within the acceptable temporal window relative to the Action Envelope.
+Verify each candidate Approval needed to satisfy, block, or override policy. Verify the signature, confirm the signed payload binds to the computed Action Envelope hash, confirm the signing key is authorized for the claimed Signer identity (see Section 7.8), confirm the Approval's `createdAt` is within the acceptable temporal window relative to the Action Envelope, and, when the signed payload contains `reviewArtifact`, confirm it names the Application metadata the Verifier uses (Section 5.5.7). An Approval that fails any of these checks is ignored and reported (Section 5.5.7); it does not reject the Action Package unless it is the Proposer's Approval.
 
 **Step 10: Evaluate Policy and Produce Response**
 
@@ -1182,7 +1252,7 @@ Evaluate the Action Package against current policy using only verified Approvals
 | malformed                   | The Action Package is structurally invalid.                                                                 |
 | policyUnavailable           | The Verifier cannot determine applicable policy at this time.                                               |
 
-When the response is `additionalApprovalsRequired`, the Verifier SHOULD return an Authorization Requirements object. A rejected action MUST NOT include Authorization Requirements and MUST NOT be dispatched. When policy is satisfied, the Verifier transitions the action to `executing` per Section 6.9 and begins dispatch. When the response resolves the Action, the Verifier or MPAS-aware component SHOULD issue an Execution Receipt.
+When the response is `additionalApprovalsRequired`, the Verifier SHOULD return an Authorization Requirements object. Whenever the Verifier ignores an Approval (Section 5.5.7), it MUST report the Approval and the reason, whatever the response, including when the Action executes using other Approvals, in the form the binding defines (HTTP Profile §6.4.3). A rejected action MUST NOT include Authorization Requirements and MUST NOT be dispatched. When policy is satisfied, the Verifier transitions the action to `executing` per Section 6.9 and begins dispatch. When the response resolves the Action, the Verifier or MPAS-aware component SHOULD issue an Execution Receipt.
 
 ### 6.3 Phase 3: Signer Review Set Distribution
 
@@ -1228,7 +1298,7 @@ A human Signer SHOULD be shown the actual Execution Payload and Action Envelope,
 
 #### 6.4.4 Approval Creation
 
-The Signer MUST create an Approval object as defined in Section 5.5. The Approval MUST bind to the computed Action Envelope hash. The Signer MUST sign using the applicable signature format.
+The Signer MUST create an Approval object as defined in Section 5.5. The Approval MUST bind to the computed Action Envelope hash. The Signer MUST sign using the applicable signature format. If the Signer reviewed the Action with content-addressed Application metadata, such as an Application Plugin artifact, it SHOULD name that metadata in the signed payload's `reviewArtifact` (Section 5.5.5.1).
 
 #### 6.4.5 Approval Return
 
@@ -1351,7 +1421,7 @@ executing ──[dispatch completes]──────────────�
 For every submission the Verifier computes the Action Envelope hash and consults the ledger:
 
 1. **`actionId` not in the ledger** — Perform full verification and policy evaluation of the submitted package.
-   - Any deterministic rejection (invalid signature, expired envelope, envelope validity window exceeded, unknown application, disabled operation, resource restriction, definitive policy denial) → respond `rejected` or `expired` and **record NOTHING**. The verdict is repeatable.
+   - Any deterministic rejection (invalid Proposer Approval, expired envelope, envelope validity window exceeded, unknown application, disabled operation, resource restriction, definitive policy denial) → respond `rejected` or `expired` and **record NOTHING**. The verdict is repeatable.
    - Insufficient approvals → respond `additionalApprovalsRequired` and **record NOTHING**.
    - Authorized → perform fallible, side-effect-free preparation (credential resolution, target launch / connection establishment), then durably write `executing` BEFORE transmitting, then transmit.
 2. **`actionId` in the ledger, DIFFERENT envelope hash** — MUST reject; the ledger is unchanged.
@@ -1704,7 +1774,7 @@ MPAS may interact with existing identity and authentication systems, including D
 
 ### 9.3 Signing and Signature Container Standards
 
-MPAS Core v0.3 defines JWS as the normative signature format. Implementations MUST follow JWT Best Current Practices (RFC 8725 / BCP 225) for JWS algorithm safety. Additional signature formats may be defined by future profiles.
+MPAS Core v0.4 defines JWS as the normative signature format. Implementations MUST follow JWT Best Current Practices (RFC 8725 / BCP 225) for JWS algorithm safety. Additional signature formats may be defined by future profiles.
 
 ### 9.4 Human Review and Clear Signing
 
@@ -1758,13 +1828,13 @@ Compatibility profiles must preserve the core MPAS security properties: canonica
 
 ### 9.10 Standards Alignment Summary
 
-The following table summarizes how MPAS Core v0.3 relates to adjacent standards:
+The following table summarizes how MPAS Core v0.4 relates to adjacent standards:
 
-| Standard                                  | Relationship to MPAS Core v0.3                                                                  |
+| Standard                                  | Relationship to MPAS Core v0.4                                                                  |
 | :---------------------------------------- | :---------------------------------------------------------------------------------------------- |
 | MCP (Model Context Protocol)              | First intended execution-profile target. Detailed MCP profile is separate/future.               |
 | OAuth RAR (RFC 9396) / GNAP (RFC 9635)    | Related authorization negotiation and structured authorization work. Not replaced by MPAS.      |
-| UCAN / ZCAP-LD                            | Relevant to future standing grants/delegation. Not Core v0.3 scope.                             |
+| UCAN / ZCAP-LD                            | Relevant to future standing grants/delegation. Not Core v0.4 scope.                             |
 | Verifiable Credentials / OMATrust         | Relevant to identity, role, key-binding, and trust attestations. Not mandatory Core dependency. |
 | Safe / ERC-4337 / EIP-1271 / EIP-712      | Future blockchain signature and execution profiles.                                             |
 | SCITT / Sigstore / in-toto / did:artifact | Relevant to future application plugin artifact identity, provenance, and audit.                 |
@@ -1811,7 +1881,7 @@ Future versions may define mappings to policy standards (OPA/Rego, Cedar, OpenFG
 
 ### 10.7 State Binding and Preconditions
 
-Future profiles may define hash-bound preconditions or state assertions, such as PR head SHA, object revision, ETag, account nonce, resource version, chain state root, or other state commitments that must hold at execution time. MPAS Core v0.3 does not define a generic precondition or state-root model.
+Future profiles may define hash-bound preconditions or state assertions, such as PR head SHA, object revision, ETag, account nonce, resource version, chain state root, or other state commitments that must hold at execution time. MPAS Core v0.4 does not define a generic precondition or state-root model.
 
 ### 10.8 Verifier-Bound Encrypted Action Packages
 
@@ -1913,7 +1983,7 @@ By standardizing how Actions are proposed, approved, verified, executed, and rec
 
 ### Design Principles
 
-1. **Strict Core v0.3 validation schema.** These schemas validate the MPAS Core v0.3 protocol objects. Core protocol objects are closed with `additionalProperties: false` unless the specification explicitly allows profile extension. The `target` sub-object is kept extensible because the spec explicitly states "Profiles MAY define additional `target.*` fields." All other Core objects are closed.
+1. **Strict Core v0.4 validation schema.** These schemas validate the MPAS Core v0.4 protocol objects. Core protocol objects are closed with `additionalProperties: false` unless the specification explicitly allows profile extension. The `target` sub-object is kept extensible because the spec explicitly states "Profiles MAY define additional `target.*` fields." All other Core objects are closed.
 
 2. **Shared definitions via `$defs`.** Common types (`Hash`, `DID`, `Timestamp`, `Decision`, `SignatureObject`, `Version`, `ActionId`) are defined once in the shared definitions schema and referenced throughout. This ensures consistency and simplifies maintenance.
 
@@ -1966,7 +2036,7 @@ The following structural constraints are derived from the entire specification �
 - `actionEnvelopeHash` required (Hash).
 - `decision` required — Core values: `propose`, `approve`, `reject`, `abstain`.
 - `signature` required (SignatureObject).
-- `createdAt` required — because v0.3 only defines Signature Approvals, and Signature Approvals MUST include `createdAt`.
+- `createdAt` required — because v0.4 only defines Signature Approvals, and Signature Approvals MUST include `createdAt`.
 - `expiresAt` optional (inherits `actionEnvelope.expiresAt` if absent).
 
 ### From Section 5.5.5 (Canonical Approval Payload)
@@ -1976,9 +2046,10 @@ The following structural constraints are derived from the entire specification �
 - `signerDid` conditional — REQUIRED when policy evaluates signer identity by DID (not structurally enforceable; schema marks optional).
 - `createdAt` required.
 - `expiresAt` optional.
+- `reviewArtifact` optional (DID).
 
 ### From Section 5.5.5.2 (Signature Object)
-- `format` MUST be `"jws"` (only format in v0.3).
+- `format` MUST be `"jws"` (only format in v0.4).
 - `value` required — JWS Compact Serialization.
 - `payload` field MUST be omitted — enforced by `additionalProperties: false`.
 
@@ -2014,7 +2085,8 @@ The following structural constraints are derived from the entire specification �
 
 ### From Section 5.8.5 (Approval Requirements)
 - At least one of `anyOf`, `allOf`, or `overrideSigners` SHOULD be present — enforced as strict quality gate.
-- `anyOf`/`allOf` contain ThresholdRequirement objects.
+- `anyOf`/`allOf` contain ThresholdRequirement or RequirementGroup objects; a RequirementGroup's `requirements` contains the same.
+- The depth limit (4) and the 32-threshold limit are not schema-enforceable; readers and producers enforce them (Section 5.8.5).
 
 ### From Section 5.8.6 (Threshold Requirement)
 - `type` MUST be `"threshold"`.
@@ -2083,8 +2155,8 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://oma3.org/schemas/mpas/base/0.2/definitions.json",
-  "title": "MPAS Core v0.3 Shared Definitions",
-  "description": "Shared type definitions for MPAS Core v0.3 data structures.",
+  "title": "MPAS Core v0.4 Shared Definitions",
+  "description": "Shared type definitions for MPAS Core v0.4 data structures.",
   "$defs": {
     "DID": {
       "type": "string",
@@ -2119,16 +2191,16 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
     "Decision": {
       "type": "string",
       "enum": ["propose", "approve", "reject", "abstain"],
-      "description": "Core MPAS v0.3 decision values. Verifiers and Applications MAY define additional values under deployment-specific or profile-specific schemas."
+      "description": "Core MPAS v0.4 decision values. Verifiers and Applications MAY define additional values under deployment-specific or profile-specific schemas."
     },
     "SignatureObject": {
       "type": "object",
-      "description": "Approval signature object. Only JWS format is defined in v0.3.",
+      "description": "Approval signature object. Only JWS format is defined in v0.4.",
       "properties": {
         "format": {
           "type": "string",
           "const": "jws",
-          "description": "Signature format. MUST be 'jws' in Core v0.3."
+          "description": "Signature format. MUST be 'jws' in Core v0.4."
         },
         "value": {
           "type": "string",
@@ -2142,7 +2214,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
     "Version": {
       "type": "string",
       "const": "1",
-      "description": "MPAS protocol object version. MUST be '1' for Core v0.3."
+      "description": "MPAS protocol object version. MUST be '1' for Core v0.4."
     },
     "ActionId": {
       "type": "object",
@@ -2316,6 +2388,10 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
     "expiresAt": {
       "$ref": "definitions.json#/$defs/Timestamp",
       "description": "Optional. Timestamp after which the Approval should no longer be accepted."
+    },
+    "reviewArtifact": {
+      "$ref": "definitions.json#/$defs/DID",
+      "description": "Optional. DID that content-addresses the Application metadata the Signer used to review the Action, such as the did:artifact of an Application Plugin."
     }
   },
   "required": ["type", "actionEnvelopeHash", "decision", "createdAt"],
@@ -2477,6 +2553,31 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
       "required": ["type", "threshold", "eligibleSigners"],
       "additionalProperties": false
     },
+    "RequirementGroup": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["anyOf", "allOf"]
+        },
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RequirementItem" },
+          "minItems": 1
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": ["type", "requirements"],
+      "additionalProperties": false
+    },
+    "RequirementItem": {
+      "oneOf": [
+        { "$ref": "#/$defs/ThresholdRequirement" },
+        { "$ref": "#/$defs/RequirementGroup" }
+      ]
+    },
     "OverrideSigner": {
       "type": "object",
       "properties": {
@@ -2498,15 +2599,15 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
       "properties": {
         "anyOf": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ThresholdRequirement" },
+          "items": { "$ref": "#/$defs/RequirementItem" },
           "minItems": 1,
-          "description": "Alternative approval paths. If any path is satisfied, the Action may be authorized."
+          "description": "Alternatives. At least one must be satisfied, together with every allOf item."
         },
         "allOf": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ThresholdRequirement" },
+          "items": { "$ref": "#/$defs/RequirementItem" },
           "minItems": 1,
-          "description": "Approval paths that must all be satisfied."
+          "description": "Items that must all be satisfied."
         },
         "overrideSigners": {
           "type": "array",
@@ -2544,7 +2645,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
     "format": {
       "type": "string",
       "const": "jws",
-      "description": "Signature format. MUST be 'jws' in Core v0.3."
+      "description": "Signature format. MUST be 'jws' in Core v0.4."
     },
     "signature": {
       "type": "string",
@@ -2581,7 +2682,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
     "result": {
       "type": "string",
       "enum": ["executed", "rejected", "failed", "indeterminate", "expired", "cancelled", "revoked"],
-      "description": "Core v0.3 result values. `cancelled` is reserved for verifier-side signed cancellation (Section 6.9.6); `revoked` is reserved for standing authorization grants; neither is producible by dispatch in this version. Verifiers and Applications MAY define additional values under deployment-specific schemas."
+      "description": "Core v0.4 result values. `cancelled` is reserved for verifier-side signed cancellation (Section 6.9.6); `revoked` is reserved for standing authorization grants; neither is producible by dispatch in this version. Verifiers and Applications MAY define additional values under deployment-specific schemas."
     },
     "issuedAt": { "$ref": "definitions.json#/$defs/Timestamp" },
     "executionRef": {
@@ -2609,8 +2710,8 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
 | 7   | DID fields MUST be structurally valid DIDs                                                                                              | `pattern: "^did:[a-z0-9]+:[^\\s]+$"`                                  |
 | 8   | Timestamps MUST be RFC 3339 UTC ending in Z                                                                                             | `format: "date-time"` + `pattern: "Z$"`                               |
 | 9   | Approval MUST include `actionEnvelopeHash`, `decision`, `signature`, `createdAt`                                                        | `required` array                                                      |
-| 10  | Approval `decision` MUST be a Core v0.3 value                                                                                           | `enum: ["propose", "approve", "reject", "abstain"]`                   |
-| 11  | Signature `format` MUST be `"jws"` in v0.3                                                                                              | `const: "jws"`                                                        |
+| 10  | Approval `decision` MUST be a Core v0.4 value                                                                                           | `enum: ["propose", "approve", "reject", "abstain"]`                   |
+| 11  | Signature `format` MUST be `"jws"` in v0.4                                                                                              | `const: "jws"`                                                        |
 | 12  | JWS `value` MUST be JWS Compact Serialization                                                                                           | `pattern` for three dot-separated base64url segments                  |
 | 13  | Signature object MUST NOT have extra fields (no `payload`)                                                                              | `additionalProperties: false`                                         |
 | 14  | Approval Bundle `approvals` MUST be non-empty                                                                                           | `minItems: 1`                                                         |
@@ -2624,7 +2725,7 @@ All standalone schemas use `$ref` to definitions. The combined `mpas-base-0.2.sc
 | 22  | Execution Receipt `format` MUST be `"jws"`                                                                                              | `const: "jws"`                                                        |
 | 23  | Execution Receipt `signature` MUST be JWS Compact Serialization                                                                         | `pattern`                                                             |
 | 24  | Receipt Payload MUST include `issuerDid`, `actionEnvelopeHash`, `executionPayloadHash`, `result`, `issuedAt`                            | `required`                                                            |
-| 25  | Receipt Payload `result` MUST be a Core v0.3 value                                                                                      | `enum`                                                                |
+| 25  | Receipt Payload `result` MUST be a Core v0.4 value                                                                                      | `enum`                                                                |
 | 26  | Canonical Approval Payload `type` MUST be `"ApprovalPayload"`                                                                           | `const`                                                               |
 | 27  | `executionProfile.id` MUST be a DID                                                                                                     | `$ref` to DID definition                                              |
 | 28  | Core protocol objects MUST NOT contain undeclared fields                                                                                | `additionalProperties: false` (except `target`)                       |

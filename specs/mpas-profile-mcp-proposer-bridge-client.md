@@ -8,7 +8,7 @@
 
 **MCP protocol version:** `2026-07-28`
 
-**Depends on:** [MPAS Core Specification v0.3](./mpas-specification.md), [MPAS HTTP Profile](./mpas-profile-http.md), [MPAS MCP Execution Profile](./mpas-profile-mcp.md), and the official MCP extension `io.modelcontextprotocol/tasks`
+**Depends on:** [MPAS Core Specification v0.4](./mpas-specification.md), [MPAS HTTP Profile](./mpas-profile-http.md), [MPAS MCP Execution Profile](./mpas-profile-mcp.md), and the official MCP extension `io.modelcontextprotocol/tasks`
 
 **Feature records:** [Official MCP Tasks integration](../docs/features/mcp-tasks/spec.md), [temporary conventional-client compatibility](../docs/features/mcp-client-compatibility/spec.md), [reduced proposer-bridge polling](../docs/features/reduce-polling/spec.md)
 
@@ -210,6 +210,8 @@ rewriting the stored signed package.
 Proposer-authored `authorizationRequirements.approvalRequirements` is present.
 These conditions normally derive from the Verifier's advisory A1 response.
 Profile version 3 MUST NOT expose collected-versus-required approval counts.
+`requirements` can contain requirement groups (MPAS Core §5.8.5); a client that
+displays it MUST handle them and MUST reject requirements beyond the Core limits.
 
 | Bridge workflow state | Task status | Authorization state |
 |---|---|---|
@@ -343,7 +345,9 @@ Proposer Approval. It MAY reuse the same profile-native Execution Payload.
 It then authors A2-bound Authorization Requirements, normally by deriving the
 approval conditions, policy reference, and intended `verifier.did` from the
 Verifier's A1-bound advisory response. The H2-bound object is Proposer-authored
-and MUST NOT be represented as Verifier-authored.
+and MUST NOT be represented as Verifier-authored. The bridge SHOULD forward the
+Verifier's `expectedReviewArtifact`, when present, in the workflow request
+(HTTP Profile §8.4).
 
 The bridge explicitly calls `/mpas/v1/coordination/workflow` with A2 when
 Coordination is configured. It MUST NOT assume that an Action Relay created

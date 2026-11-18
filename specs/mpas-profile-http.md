@@ -715,6 +715,8 @@ Fields:
 | `actionEnvelopeHash`        | Recommended | Hash of the Action Envelope, when computable.                                                                                                            |
 | `result`                    |     Yes     | Action result value.                                                                                                                                     |
 | `authorizationRequirements` | Conditional | Required when `result` is `additionalApprovalsRequired`.                                                                                                 |
+| `ignoredApprovals`          | Conditional | Approvals the Verifier did not count because they failed verification (§6.4.3). REQUIRED whenever the Verifier ignored an Approval, whatever the result, including `executed`. |
+| `expectedReviewArtifact`    |  Optional   | Non-authoritative hint: the DID of the content-addressed Application metadata the Verifier uses for this Action, such as the `did:artifact` of its Application Plugin (Core §5.5.5.1). SHOULD be present with `additionalApprovalsRequired` when the Verifier uses such metadata. It is unsigned, may be stale or wrongly forwarded, and is neither a download location nor evidence that the metadata is trustworthy. The Verifier's comparison of each Approval's `reviewArtifact` remains authoritative. |
 | `executionReceipt`          | Conditional | Recommended when the Action is resolved. Required by profiles that require receipts for completed Actions.                                               |
 | `executionResult`           |  Optional   | INFORMATIVE execution-profile-native response content (see Section 6.4.1). Not hash-bound, not covered by the receipt signature, not an attestation of output. |
 | `error`                     |  Optional   | Machine-readable detail for `rejected`/`failed`/`malformed` results (`{ code, message }`). Distinct from the transport-level `MpasHttpError` (Section 4.9). |
@@ -765,12 +767,48 @@ A Verifier SHOULD include `context.diagnostic` when a `failed`, `indeterminate`,
 
 Diagnostic content MUST be sanitized and resource-bounded. It MUST NOT contain credentials, authorization headers, environment-variable values, secrets, tokens, private keys, raw command arguments, or raw process output. Implementations MUST ignore unknown diagnostic fields and codes without changing their interpretation of `result`.
 
+#### 6.4.3 ignoredApprovals
+
+`ignoredApprovals` lists each Approval the Verifier did not count because it failed verification (Core §5.5.7). It is reported whatever the result, including when the Action executes using other Approvals.
+
+```json
+{
+  "ignoredApprovals": [
+    {
+      "index": 1,
+      "signerDid": "did:web:bob.example",
+      "code": "REVIEW_ARTIFACT_MISMATCH",
+      "message": "The Approval names a different plugin artifact from the one this Verifier uses.",
+      "reviewArtifact": "did:artifact:bafkreiexampleartifact"
+    }
+  ]
+}
+```
+
+| Field       | Required | Description |
+| ----------- | :------: | ----------- |
+| `index`     |   Yes    | Zero-based position of the Approval in the submitted `approvalBundle.approvals`. |
+| `signerDid` | Optional | Signer DID stated in the Approval's signed payload. For `INVALID_SIGNATURE` and `UNTRUSTED_SIGNER` it is unverified. |
+| `code`      |   Yes    | Why the Approval was ignored. |
+| `message`   | Optional | Sanitized human-readable explanation. |
+
+| Code                        | Meaning |
+| --------------------------- | ------- |
+| `INVALID_SIGNATURE`         | The signature could not be verified. |
+| `UNTRUSTED_SIGNER`          | The signer is not trusted, or the signing key is not authorized for it. |
+| `APPROVAL_PAYLOAD_MISMATCH` | The top-level Approval fields differ from the signed payload. |
+| `APPROVAL_TIME_INVALID`     | The Approval has expired, or its `createdAt` is outside the accepted window. |
+
+Profiles MAY define further codes, with additional members for them, such as `REVIEW_ARTIFACT_MISMATCH` and its `reviewArtifact` member in the Application Plugin Profile §13.2. Clients MUST ignore unknown codes and members.
+
+`ignoredApprovals` covers only Approvals that failed verification. A failed Proposer Approval is not listed, because it rejects the Action Package (Core §5.5.7). A verified Approval that did not count toward policy, for example one from a Signer outside every requirement, is not listed, and verified decisions that block, conflict, or override under the applicable policy are policy outcomes, not ignored Approvals. Entries are diagnostics for the Proposer and operators; a client MUST NOT treat a `reviewArtifact` named in them as evidence that Application metadata is trustworthy.
+
 ### 6.5 ActionResponse Result Values
 
 | Result                        | Meaning                                                                                                                                                   |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `executed`                    | The Action was authorized and executed. An Execution Receipt SHOULD be present.                                                                           |
-| `additionalApprovalsRequired` | The Action Package does not satisfy current policy. Authorization Requirements SHOULD be present as advisory input from which the Proposer may construct a replacement Action. |
+| `additionalApprovalsRequired` | The Action Package does not satisfy current policy. Authorization Requirements SHOULD be present as advisory input from which the Proposer may construct a replacement Action; they describe the complete requirement, not only the unmet part (Core §5.8.1). |
 | `rejected`                    | The Verifier rejected the Action, including a deterministic policy block. An Execution Receipt SHOULD be present if the Action is resolved.                 |
 | `notSupported`                | The Verifier does not support the requested Application, operation, payload format, or verification mode.                                                 |
 | `malformed`                   | The Action Package is structurally invalid, not canonicalizable, or has invalid hash bindings.                                                            |
@@ -791,7 +829,7 @@ The ActionResponse `result` values are a projection of the Core Action Lifecycle
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `pending`                     | `executing` ledger entry — dispatch is in progress and an asynchronous Verifier answers before it completes. An identical submission triggers no second dispatch; it joins the dispatch (below). |
 | `additionalApprovalsRequired` | Stateless response — no ledger entry; verification deterministically reports unmet policy. A conforming client retires this Action ID after receiving the response. |
-| `rejected`                    | Stateless response — no ledger entry; deterministic rejection (invalid signature, unknown application, disabled operation, resource restriction, policy denial). Repeatable. |
+| `rejected`                    | Stateless response — no ledger entry; deterministic rejection (invalid Proposer Approval, unknown application, disabled operation, resource restriction, policy denial). Repeatable. |
 | `expired`                     | Stateless response — no ledger entry; the envelope is past `expiresAt`. Repeatable.                                            |
 | `malformed`                   | Stateless response — no ledger entry; artifact-level structural failure inside a hashable package.                            |
 | `policyUnavailable`           | Stateless response — no ledger entry; transient.                                                                              |
@@ -944,6 +982,7 @@ Response:
     "createdAt": "2026-05-31T18:00:02.000Z",
     "expiresAt": "2026-05-31T19:00:02.000Z"
   },
+  "expectedReviewArtifact": "did:artifact:bafkreiexampleartifact",
   "createdAt": "2026-05-31T18:00:02.000Z"
 }
 ```
@@ -1026,6 +1065,7 @@ Fields:
 | `type`              |   Yes    | MUST be `ApprovalRequest`.                                          |
 | `signerReviewSet`   |   Yes    | Signer Review Set containing Execution Payload and Action Envelope. |
 | `requestedDecision` | Optional | Requested decision.                                                 |
+| `expectedReviewArtifact` | Optional | Non-authoritative hint forwarded from the Verifier's response (§6.4): the Application metadata the Verifier uses. The Signer obtains that metadata through its own configured sources and accepts it only under its own rules; the hint is not a download location. |
 | `returnMode`        | Optional | `sync` or `async`. Defaults to deployment behavior.                 |
 | `context`           | Optional | Non-authoritative explanatory metadata.                             |
 
@@ -1273,6 +1313,7 @@ Fields:
 | `type`                      |     Yes     | MUST be `CoordinationActionRequest`.                                                                                                               |
 | `actionPackage`             |     Yes     | Complete MPAS Action Package.                                                                                                                      |
 | `authorizationRequirements` | Recommended | Proposer-authored requirements for the enclosed Action Package. They tell the Coordination Service what Approvals to collect and normally derive their approval conditions from advisory Verifier feedback for an earlier Action. |
+| `expectedReviewArtifact`    |  Optional   | The Verifier's `expectedReviewArtifact` hint (§6.4), forwarded unchanged. |
 | `idempotencyKey`            | Recommended | Mutation idempotency key (§4.5).                                                                                                                    |
 | `audience`                  | Conditional | Configured service URL origin (§4.6.3). Required whenever the request carries an MPAS signature; MAY be omitted only on an unsigned request to an unenforcing service. |
 | `context`                   |  Optional   | Non-authoritative metadata.                                                                                                                        |
@@ -1304,12 +1345,13 @@ Rules:
 - On a signed request, signature `keyid` **MUST** equal `actionPackage.actionEnvelope.proposer.did` before processing; mismatch **MUST** be rejected with `403`.
 - The Coordination Service **MUST** compute the Action Envelope hash from the received Action Envelope.
 - The Proposer-authored Authorization Requirements **MUST** use `result: additionalApprovalsRequired`.
-- Before creating a workflow, it **MUST** verify `actionEnvelope.executionPayloadHash` and `approvalBundle.actionEnvelopeHash`; verify that the Authorization Requirements bind to the enclosed A2 Action Envelope hash and contain a structurally valid intended `verifier.did`; reject expired requirements; and reject duplicate or unachievable `eligibleSigners` threshold sets. A failure creates no workflow. Hash failures use `400 artifact_hash_mismatch`, expired requirements use `409 expired`, and other requirements failures use `400 invalid_request`. This check does not authenticate the Verifier as the object's author or require the Coordination Service to know the Verifier.
+- Before creating a workflow, it **MUST** verify `actionEnvelope.executionPayloadHash` and `approvalBundle.actionEnvelopeHash`; verify that the Authorization Requirements bind to the enclosed A2 Action Envelope hash and contain a structurally valid intended `verifier.did`; reject expired requirements; and reject duplicate or unachievable `eligibleSigners` threshold sets; and reject requirements that exceed the depth or size limits of Core §5.8.5 before evaluating them. A failure creates no workflow. Hash failures use `400 artifact_hash_mismatch`, expired requirements use `409 expired`, and other requirements failures use `400 invalid_request`. This check does not authenticate the Verifier as the object's author or require the Coordination Service to know the Verifier.
 - The Proposer DID is not categorically forbidden from `eligibleSigners`. Whether a Proposer Approval counts is determined by the applicable Verifier policy or policy profile.
 - The Coordination Service **SHOULD** compute and store the Execution Payload hash and Action Package hash for audit/debugging, but those hashes are not substitutes for the normative Action Envelope binding.
 - Proposer-authored `authorizationRequirements` are coordination input, not Verifier authority. The enclosed `verifier.did` identifies the intended Verifier; it does not prove that Verifier authored or endorsed the object. Before exposing review material, the Coordination Service **MUST** apply its own administrative authorization to every candidate recipient. It **MUST NOT** bypass that authorization because it is co-located with an Action Relay or can read relay records.
 - `CoordinationActionRequest` has no separate top-level Verifier identity. The Coordination Service **MUST NOT** use the requirements' `verifier.did` for caller authorization, require contact with that Verifier, or infer that the Verifier approved the Proposer-authored requirements.
 - If `authorizationRequirements` are provided and the candidates are authorized, the Coordination Service **SHOULD** use them to determine which Signers receive Approval Requests.
+- A forwarded `expectedReviewArtifact` is Proposer-supplied and non-authoritative. The Coordination Service **SHOULD** store it with the workflow and include it unchanged in the workflow's Approval Requests (§8.5). It does not fetch, validate, or vouch for the artifact.
 - The Coordination Service makes collected Approvals and completed Action Packages available to the Proposer through `/mpas/v1/coordination/poll`.
 - The Authorization Requirements do not freeze Verifier policy. The Proposer submits completed A2 to the logical Verifier, which evaluates A2 against its current policy under the existing Core rules.
 
@@ -1413,10 +1455,10 @@ Response:
 Rules:
 
 - On a signed request, the server **MUST** establish `keyid == did` before processing, reject mismatch with `403`, and scope all returned data to that agreed DID.
-- `approvalRequests` contains pending Approval Requests for actions where the DID is listed in `eligibleSigners` and the action is in `awaitingApprovals` state. Cancelled actions are not included.
+- `approvalRequests` contains pending Approval Requests for actions where the DID is an **eligible signer** and the action is in `awaitingApprovals` state. An eligible signer is listed in the `eligibleSigners` of any threshold in the requirements, including thresholds inside requirement groups, or in `overrideSigners` (Core §5.8.5, §5.8.7). The Coordination Service's administrative authorization of each recipient still applies (§8.4). Cancelled actions are not included. An Approval Request carries the workflow's `expectedReviewArtifact` when it has one.
 - `actionUpdates` contains state and progress for actions where the DID is the proposer.
 - Every action update includes `expiresAt`, copied unchanged from `ActionEnvelope.expiresAt`. This is the Action's authoritative deadline, not the time at which the Coordination Service noticed or recorded expiration.
-- Each action update includes a `progress` object with `required` (threshold count), `collected` (approvals collected so far), and `pending` (eligible DIDs that haven't responded). Not present for cancelled actions.
+- Each action update includes a `progress` object with `pending`: the eligible signers, including override Signers, that haven't responded. When the requirements consist of a single threshold, `progress` also includes `required` (the threshold) and `collected` (matching approvals so far). For composite requirements, the Coordination Service MAY omit `required` and `collected`, and MUST NOT report one branch's or one threshold's counts as overall progress; clients then show progress from the requirement tree and the workflow `state`. A per-group progress format is deferred. `progress` is not present for cancelled actions.
 - When state is `readyForSubmission`, the action update includes the completed `actionPackage`. The Proposer can take this Action Package and submit it directly to the Verifier without further assembly.
 - When state is `cancelled`, the action update includes `cancelledAt` and no `progress` or `actionPackage`.
 - When state is `rejected`, the action update includes `rejectedAt`. This records when the Coordination Service's non-authoritative workflow view became rejected.
@@ -1492,7 +1534,7 @@ Response:
 
 Rules:
 
-- On a signed request, signature `keyid` **MUST** equal the signer DID decoded from the Approval, and that DID **MUST** be an eligible signer for the referenced workflow before processing; mismatch or ineligibility **MUST** be rejected with `403` before the Approval is stored or counted.
+- On a signed request, signature `keyid` **MUST** equal the signer DID decoded from the Approval, and that DID **MUST** be an eligible signer for the referenced workflow (§8.5) before processing; mismatch or ineligibility **MUST** be rejected with `403` before the Approval is stored or counted.
 - The Coordination Service **MUST** store Approval objects unmodified.
 - The Coordination Service **MAY** perform structural checks, hash checks, duplicate detection, and signature pre-validation.
 - Coordination Service pre-validation is not authoritative unless the Verifier explicitly trusts the Coordination Service for that role.
@@ -1599,7 +1641,7 @@ of final states (`executed`, `rejected`, `expired`) is deployment-specific.
 When a state name reuses a Verifier result, its meaning MUST remain consistent
 with that result.
 
-Because additional-approval decisions are immutable under §8.6, a Coordination Service **SHOULD** transition its non-authoritative workflow view to `rejected` as soon as no `anyOf` threshold path remains reachable or any `allOf` threshold can no longer be reached with the remaining undecided eligible Signers. The Verifier still performs authoritative policy evaluation.
+Because additional-approval decisions are immutable under §8.6, a Coordination Service **SHOULD** transition its non-authoritative workflow view to `rejected` as soon as the requirements are no longer achievable with the remaining undecided eligible Signers, evaluated recursively as in Core §5.8.5. An `anyOf` item that becomes unachievable leaves the workflow pending while another item remains achievable. The Verifier still performs authoritative policy evaluation.
 
 The Verifier performs authoritative verification when it receives the completed replacement Action Package through the direct or relayed Action interface.
 
@@ -1782,6 +1824,7 @@ A conforming Verifier / Application endpoint **MUST** support:
 - `application/mpas+json`;
 - deterministic MPAS artifact verification;
 - `additionalApprovalsRequired` responses with Authorization Requirements bound by `actionEnvelopeHash`;
+- `ignoredApprovals` whenever an Approval was ignored, whatever the result (§6.4.3);
 - final or non-final ActionResponse result values defined in this profile.
 
 ### 11.2 Signer Conformance
