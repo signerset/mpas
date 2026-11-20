@@ -31,13 +31,13 @@ async function importSupport(name: string): Promise<any> {
 }
 
 /** The operator's browser: Wivity Link sign-in through the stub account service, then consent. */
-function operatorBrowser(expectedClientText?: string) {
+function operatorBrowser(...expectedClientText: string[]) {
   return async (url: URL) => {
     const browser = new support.browser.TestBrowser();
     const stop = support.oauthClient.atRedirect(url.searchParams.get("redirect_uri")!);
     let result = await browser.follow(url.toString(), stop);
     if (result.page?.html.includes('name="csrf"')) {
-      if (expectedClientText) expect(result.page.html).toContain(expectedClientText);
+      for (const text of expectedClientText) expect(result.page.html).toContain(text);
       result = await browser.submitConsent(result.page, "allow", stop);
     }
     expect(stop(result.url), `login stopped at ${result.url}: ${result.page?.html?.slice(0, 400) ?? ""}`).toBe(true);
@@ -194,7 +194,7 @@ describe.skipIf(!enabled)("Phase 7: local Wivity Link", () => {
       credentialDir,
       testOnlyAllowHttpLoopback: true,
       fetch: adapterFetch(() => documents),
-      onAuthorizationUrl: operatorBrowser("MPAS Credential Adapter, from <strong>adapter.example</strong>"),
+      onAuthorizationUrl: operatorBrowser("MPAS Credential Adapter", "<strong>adapter.example</strong>"),
     });
     await expect(service.login(request)).resolves.toMatchObject({
       status: "authorized",
