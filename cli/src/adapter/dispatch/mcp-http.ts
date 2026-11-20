@@ -44,8 +44,8 @@ export async function prepareMcpHttp(
     oauthOperatorCommand ?? "mpas oauth login", onScopeChallenge,
     () => managed.recordAccessDenied?.(),
   ) : fetchFn;
-  // A managed provider classifies token-endpoint responses on this transport too, so a
-  // refresh after a 401 follows the same OAUTH-30 rules as one before dispatch.
+  // A managed provider classifies token-endpoint responses during preparation.
+  // Once a tool call is transmitted, authentication recovery must not resend it.
   const transportFetch = managed?.wrapFetch ? managed.wrapFetch(guardedFetch) : guardedFetch;
   const transport = new VersionedStreamableHttpClientTransport(
     new URL(target.url),
@@ -107,7 +107,29 @@ class VersionedStreamableHttpClientTransport extends StreamableHTTPClientTranspo
     options: ConstructorParameters<typeof StreamableHTTPClientTransport>[1],
     private readonly initializationProtocolVersion: string,
   ) {
-    super(url, options);
+    const fetchRequest = options?.fetch ?? globalThis.fetch;
+    super(url, {
+      ...options,
+      fetch: async (input, init) => {
+        // Inspect each serialized request independently, including batched messages.
+        // Preparation may authenticate normally; a dispatched tool call must never
+        // be resent by redirect handling or the SDK's authentication recovery.
+        const message: unknown = init?.method === "POST" && typeof init.body === "string"
+          ? JSON.parse(init.body) : undefined;
+        const messages = Array.isArray(message) ? message : [message];
+        const isToolCall = messages.some(item =>
+          typeof item === "object" && item !== null && "method" in item && item.method === "tools/call",
+        );
+        const response = await fetchRequest(input, isToolCall ? { ...init, redirect: "manual" } : init);
+        if (isToolCall && !response.ok) {
+          await response.body?.cancel().catch(() => {});
+          // McpClientSession maps this to TRANSPORT_ERROR (indeterminate). Do not
+          // expose upstream bodies or let the SDK refresh and repeat the request.
+          throw new Error("MCP tool call HTTP failure after dispatch; the operation was not retried.");
+        }
+        return response;
+      },
+    });
   }
 
   override send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {

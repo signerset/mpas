@@ -1,3 +1,4 @@
+import { prepareMcpHttp } from "../../src/adapter/dispatch/mcp-http.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -175,6 +176,38 @@ describe("official MCP SDK OAuth conformance spike", () => {
       expect(fixture.tokenRequests[0].get("resource")).toBe(fixture.resourceUrl);
     } finally {
       await client.close().catch(() => {});
+    }
+  });
+
+  it("allows the adapter to refresh authentication during preparation", async () => {
+    fixture = await startOAuthProtectedMcpFixture();
+    const provider = new FixtureOAuthProvider(new URL("http://127.0.0.1:49152/oauth/callback"));
+    provider.savedTokens = {
+      access_token: "expired-access-token",
+      refresh_token: "fixture-refresh-token",
+      token_type: "Bearer",
+      expires_in: 0,
+    };
+
+    const prepared = await prepareMcpHttp(
+      { type: "mcp.http", url: fixture.resourceUrl, auth: { type: "oauth2", session: "fixture", scopes: ["mcp:tools"] } },
+      undefined, "2024-11-05", provider,
+    );
+    if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+    try {
+      expect(await prepared.session.transmit("fixture_tool", {})).toMatchObject({
+        ok: true, result: { content: [{ type: "text", text: "authorized" }] },
+      });
+      expect(provider.savedTokens).toMatchObject({
+        access_token: "fixture-refreshed-access-token",
+        refresh_token: "fixture-rotated-refresh-token",
+      });
+      expect(fixture.tokenRequests).toHaveLength(1);
+      expect(fixture.tokenRequests[0].get("grant_type")).toBe("refresh_token");
+      expect(fixture.tokenRequests[0].get("refresh_token")).toBe("fixture-refresh-token");
+      expect(fixture.tokenRequests[0].get("resource")).toBe(fixture.resourceUrl);
+    } finally {
+      await prepared.session.close();
     }
   });
 

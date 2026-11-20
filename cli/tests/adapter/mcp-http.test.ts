@@ -4,6 +4,9 @@ import { prepareMcpHttp, type McpHttpTarget } from "../../src/adapter/dispatch/m
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 
 let server: http.Server | undefined;
+let toolFailureStatus: number | undefined;
+let toolCalls = 0;
+let unexpectedRequests = 0;
 let scopeChallengeMethod: string | undefined;
 let initializedProtocolVersion: string | undefined;
 
@@ -12,6 +15,9 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = undefined;
   }
+  toolFailureStatus = undefined;
+  toolCalls = 0;
+  unexpectedRequests = 0;
   initializedProtocolVersion = undefined;
   scopeChallengeMethod = undefined;
 });
@@ -24,6 +30,12 @@ async function startMcpServer(toolDelayMs = 0): Promise<{ url: string }> {
       body += chunk;
     });
     request.on("end", () => {
+      if (request.url !== "/") {
+        unexpectedRequests++;
+        response.writeHead(404);
+        response.end();
+        return;
+      }
       if (request.method === "GET") {
         response.statusCode = 405;
         response.end();
@@ -39,6 +51,17 @@ async function startMcpServer(toolDelayMs = 0): Promise<{ url: string }> {
         response.statusCode = 202;
         response.end();
         return;
+      }
+      if (json.method === "tools/call") {
+        toolCalls++;
+        if (toolFailureStatus) {
+          response.writeHead(toolFailureStatus, {
+            location: "/redirect-target",
+            "www-authenticate": 'Bearer error="invalid_token"',
+          });
+          response.end("untrusted upstream diagnostic");
+          return;
+        }
       }
       if (json.method === scopeChallengeMethod) {
         response.writeHead(403, { "www-authenticate": 'Bearer error="insufficient_scope", scope="admin write"' });
@@ -87,6 +110,35 @@ async function startMcpServer(toolDelayMs = 0): Promise<{ url: string }> {
 }
 
 describe("prepareMcpHttp", () => {
+  it.each([401, 403, 307, 308, 500])("does not recover or redirect a dispatched tool call after HTTP %s", async status => {
+    const { url } = await startMcpServer();
+    toolFailureStatus = status;
+    const mutate = vi.fn(() => { throw new Error("unexpected OAuth recovery"); });
+    const provider: OAuthClientProvider = {
+      redirectUrl: "http://127.0.0.1/callback",
+      clientMetadata: { redirect_uris: ["http://127.0.0.1/callback"] },
+      clientInformation: () => ({ client_id: "test-client" }),
+      tokens: () => ({ access_token: "secret-token", token_type: "Bearer", refresh_token: "refresh-secret" }),
+      saveTokens: mutate, saveCodeVerifier: mutate, redirectToAuthorization: mutate,
+      invalidateCredentials: mutate,
+      codeVerifier: () => "unused",
+    };
+    const prepared = await prepareMcpHttp(
+      { type: "mcp.http", url, auth: { type: "oauth2", session: "fixture" } },
+      undefined, "2024-11-05", provider,
+    );
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error("initialization failed");
+    try {
+      const result = await prepared.session.transmit("fixture_tool", {});
+      expect(result).toMatchObject({ ok: false, error: { code: "TRANSPORT_ERROR" } });
+      expect(JSON.stringify(result)).not.toContain("untrusted upstream diagnostic");
+      expect(toolCalls).toBe(1);
+      expect(unexpectedRequests).toBe(0);
+      expect(mutate).not.toHaveBeenCalled();
+    } finally { await prepared.session.close(); }
+  });
+
   it("uses a managed OAuth provider without a static credential", async () => {
     const { url } = await startMcpServer();
     const provider: OAuthClientProvider = {
