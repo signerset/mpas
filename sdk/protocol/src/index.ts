@@ -72,6 +72,19 @@ export {
   type PayloadValidationError,
   type PayloadValidationResult,
 } from "./lib/plugin-loader.js";
+export {
+  presentOperation,
+  additionalParameters,
+  parseJsonPointer,
+  resolvePointer,
+  validateOperationDisplay,
+  DISPLAY_LIMITS,
+  type DisplayDiagnostic,
+  type OperationPresentation,
+  type PresentedValue,
+  type PresentedLink,
+  type AdditionalParameter,
+} from "./lib/plugin-display.js";
 export * from "./lib/receipt-builder.js";
 export * from "./lib/auth-requirements-builder.js";
 export * from "./lib/did-jwk.js";

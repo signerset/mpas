@@ -3,7 +3,7 @@ import { trustContextFromEnvironment } from "./trust-environment.js";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { JWK } from "jose";
 import { WebSocket } from "ws";
@@ -112,6 +112,7 @@ export const defaultVerifierCoordinationStatePath = defaultVerifierRelayStatePat
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<StartedDaemon> {
   const configDir = options.configDir ?? defaultConfigDir();
+  const journalPath = options.journalPath ?? defaultJournalPath();
   const trustContext =
     options.trustContext === undefined
       ? trustContextFromEnvironment()
@@ -120,6 +121,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
   const loaded = await loadDeploymentConfigs(configDir, {
     trustContext,
     confirmPluginUse: options.confirmPluginUse,
+    acceptanceStateDir: join(dirname(journalPath), "accepted-plugins"),
+    recordAcceptance: true,
   });
   if (!loaded.ok) {
     throw new Error(loaded.error.message);
@@ -127,7 +130,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<StartedD
 
   const adapterKey = await loadAdapterKey(options.adapterKeyPath ?? defaultAdapterKeyPath());
   const adapterSigner = KeyManager.fromJwk(adapterKey.privateJwk, { did: adapterKey.did });
-  const ledger = new DispatchLedger(new FileDispatchJournal(options.journalPath ?? defaultJournalPath()));
+  const ledger = new DispatchLedger(new FileDispatchJournal(journalPath));
   const traceWriter = options.tracePath ? new TraceWriter(options.tracePath) : undefined;
   const traceLogger = new TraceLogger("adapter", traceWriter);
   const credentialProvider = new FileCredentialProvider(options.credentialDir ?? defaultCredentialDir());

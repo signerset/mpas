@@ -1,5 +1,13 @@
 # @oma3/mpas — MPAS Protocol SDK
 
+## Unreleased: plugin review and approvals update
+
+Invalid maintainer Approvals are ignored and reported instead of rejecting the whole Action Package. **An Action previously rejected can now execute when the remaining verified Approvals satisfy policy.** Proposer verification failures, malformed bundles, and verified decision conflicts retain their existing failure behavior. Monitoring must read `ignoredApprovals` on every response, including execution, rather than relying only on rejection codes.
+
+Approvals may sign `reviewArtifact`. The adapter compares it with its verified loaded plugin artifact and supplies the unsigned `expectedReviewArtifact` hint. Generic approvals remain supported. Complete authorization requirements preserve nested choices and already-satisfied branches, with limits of four array levels and 32 thresholds. The fresh-Action-ID lifecycle is unchanged.
+
+Release the SDK and update the CLI's published SDK dependency and lockfile before shipping these CLI changes. Working-tree integration tests use the local SDK; this is not a published-package release check. Upgrade verifiers before signers emit `reviewArtifact`, and upgrade all requirement readers before deploying nested policies. The separate coordination server and maintainer applications are not included in this implementation.
+
 TypeScript implementation of MPAS (Multi-Party Action Security) protocol primitives. This is the canonical library for building any MPAS integration — Proposer agents, Verifier services, Signer servers, or Coordination Services.
 
 ## Organizing Principle

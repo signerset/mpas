@@ -1,5 +1,17 @@
 # @oma3/mpas-cli
 
+## Unreleased: plugin review and approvals update
+
+Invalid maintainer Approvals are ignored and reported instead of rejecting the whole Action Package. **An Action previously rejected can now execute when the remaining verified Approvals satisfy policy.** Proposer verification failures, malformed bundles, and verified decision conflicts retain their existing failure behavior. Monitoring must read `ignoredApprovals` on every response, including execution, rather than relying only on rejection codes.
+
+Approvals may sign `reviewArtifact`. The adapter compares it with its verified loaded plugin artifact and supplies the unsigned `expectedReviewArtifact` hint. Generic approvals remain supported. Complete authorization requirements preserve nested choices and already-satisfied branches, with limits of four array levels and 32 thresholds. The fresh-Action-ID lifecycle is unchanged.
+
+Release the SDK and update the CLI's published SDK dependency and lockfile before shipping these CLI changes. Working-tree integration tests use the local SDK; this is not a published-package release check. Upgrade verifiers before signers emit `reviewArtifact`, and upgrade all requirement readers before deploying nested policies. The separate coordination server and maintainer applications are not included in this implementation.
+
+**Merge blocker:** the current CI build and published-dependency tests still install `@oma3/mpas@0.1.0-alpha.15`, which lacks these APIs. Release the SDK change first, then update the CLI and generated-bridge dependency pins and CLI lockfile before merging the consumer changes.
+
+Adapter startup records the accepted governed set in `accepted-plugins/` alongside its dispatch journal, outside the configuration directory. Status, validation, and dry-run commands do not update it. A failed history write produces a warning; it does not prevent startup. The acceptance prompt shows additions/removals, with the full governed set under D.
+
 The reference `mpas` command: participant account setup, plus the local MPAS (Multi-Party Action Security) services — Credential Adapter daemon, Coordination Service, and Signer Server.
 
 MPAS is a protocol for multi-party approval of AI agent actions. Instead of giving agents direct access to privileged APIs (GitHub, cloud providers, databases), MPAS routes actions through a Credential Adapter that enforces policy-based approval workflows before execution.

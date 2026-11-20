@@ -303,12 +303,12 @@ describe("verifyApprovalBundle", () => {
     expect(result).toMatchObject({
       ok: false,
       error: {
-        code: "APPROVAL_HASH_MISMATCH",
+        code: "MALFORMED_APPROVAL_BUNDLE",
       },
     });
   });
 
-  it("rejects an approval from an untrusted signer", async () => {
+  it("ignores approvals from untrusted maintainers", async () => {
     const actionPackage = await readActionPackage("valid-two-approvals.json");
     const allSigners = await trustedSigners();
     const onlyProposer = allSigners.slice(0, 1);
@@ -318,12 +318,8 @@ describe("verifyApprovalBundle", () => {
       onlyProposer,
     );
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: {
-        code: "UNTRUSTED_SIGNER",
-      },
-    });
+    expect(result).toMatchObject({ ok: true, ignoredApprovals: [{ code: "UNTRUSTED_SIGNER" }, { code: "UNTRUSTED_SIGNER" }] });
+    if (result.ok) expect(result.verifiedApprovals.approvals).toHaveLength(1);
   });
 });
 

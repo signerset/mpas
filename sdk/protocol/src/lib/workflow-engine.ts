@@ -1,3 +1,4 @@
+import { readApprovalRequirements } from "./approval-requirements.js";
 import { randomUUID } from "node:crypto";
 import type {
   ActionId,
@@ -63,6 +64,7 @@ export interface WorkflowCoordinationService {
   createApprovalWorkflow(input: {
     actionPackage: ActionPackage;
     authorizationRequirements?: AuthorizationRequirements;
+    expectedReviewArtifact?: ActionResponse["expectedReviewArtifact"];
   }): Promise<CoordinationActionResponse>;
   pollWork(): Promise<CoordinationPollResponse>;
   cancelAction(input: { actionId: ActionId }): Promise<CoordinationCancelResponse>;
@@ -576,6 +578,7 @@ export class BridgeWorkflowEngine {
     }
 
     try {
+      readApprovalRequirements(verifierRequirements.approvalRequirements);
       const replacement = await this.buildCoordinationReplacement(
         record.actionPackage as ActionPackage,
         verifierRequirements,
@@ -635,6 +638,7 @@ export class BridgeWorkflowEngine {
       const coordination = await this.coordinationService.createApprovalWorkflow({
         actionPackage: record.actionPackage as ActionPackage,
         authorizationRequirements: record.authorizationRequirements as AuthorizationRequirements,
+        expectedReviewArtifact: (record.lastActionResponse as ActionResponse | undefined)?.expectedReviewArtifact,
       });
       this.store.saveCoordinationReference(record.taskId, coordination.actionRef);
       if (this.mustGet(record.taskId).state === "cancelled") {

@@ -91,6 +91,7 @@ export interface CoordinationServiceNotificationPollingOptions {
 
 /** Input for creating an approval workflow from an already evaluated Action. */
 export interface CreateApprovalWorkflowInput {
+  expectedReviewArtifact?: Did;
   /** Action Package previously evaluated by a directly reachable Verifier. */
   actionPackage: ActionPackage;
   /** Authenticated requirements returned by that Verifier. */
@@ -240,13 +241,14 @@ export class CoordinationServiceClient {
     path: "/mpas/v1/coordination/workflow" | "/mpas/v1/coordination/action",
     input: CreateApprovalWorkflowInput,
   ): Promise<CoordinationActionResponse> {
-    const { actionPackage, authorizationRequirements, idempotencyKey, context } = input;
+    const { actionPackage, authorizationRequirements, idempotencyKey, context, expectedReviewArtifact } = input;
     return this.post<CoordinationActionResponse>(
       path,
       {
         version: "1",
         type: "CoordinationActionRequest",
         actionPackage,
+        ...(expectedReviewArtifact !== undefined ? { expectedReviewArtifact } : {}),
         ...(authorizationRequirements !== undefined ? { authorizationRequirements } : {}),
         ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
         ...(context !== undefined ? { context } : {}),

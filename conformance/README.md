@@ -41,4 +41,4 @@ Validates the cryptographic and policy behavior of an adapter under test:
 
 ## Status
 
-Signature fixtures and checks are available in [HTTP Message Signatures](http-message-signatures/README.md) and [signature suites](signature-suites/README.md), including an independent OpenSSL verification command. The broader conformance tools and certification program remain future work.
+Signature fixtures and checks are available in [HTTP Message Signatures](http-message-signatures/README.md) and [signature suites](signature-suites/README.md), including an independent OpenSSL verification command. Language-neutral [plugin presentation fixtures](plugin-presentation/README.md) cover the declarative review contract. The broader conformance tools and certification program remain future work.

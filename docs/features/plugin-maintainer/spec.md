@@ -1,6 +1,6 @@
 # Application Plugin Maintainer Presentation — Feature Record
 
-**Status:** Partially implemented. The plugin schema version 2 format, SDK validation and interpretation, generator skeleton, and Credential Adapter routing exist. The Approval `reviewArtifact` field and the Verifier's check of it, the Verifier's expected-artifact hint, review context, trusted artifact selection in reviewer clients, review records, governed-set change reporting, regeneration reports, and shared conformance fixtures are specified but not implemented. §3 lists each item.
+**Status:** MPAS implementation completed in the working tree; not released. Reviewer-client implementation and the separate coordination-server integration remain deferred. §3 distinguishes repository scope from rollout.
 
 **Created:** 2026-10-28
 
@@ -56,22 +56,22 @@ Out of scope are blockchain transaction presentation, wallet implementation, new
 
 | Item | Normative source | Status |
 |---|---|---|
-| Plugin schema version 2: `display` and `governedByDefault` structure, version 1 rejection | Application Plugin Profile §8, Appendix A | Implemented in the SDK loader, except that it still rejects the empty field path (`""`, the whole payload) that the profile allows |
+| Plugin schema version 2: `display` and `governedByDefault` structure, version 1 rejection | Application Plugin Profile §8, Appendix A | Implemented in the SDK loader, including the empty root pointer. |
 | Semantic validation and resource limits | Presentation Profile §9, §10 | Implemented in the SDK |
-| Interpretation: pointers, formatting, interpolation, remainder, links, fallbacks | Presentation Profile §5–§8, §11 | Implemented in the SDK (`presentOperation`); not yet checked against shared fixtures |
+| Interpretation: pointers, formatting, interpolation, remainder, links, fallbacks | Presentation Profile §5–§8, §11 | Implemented and exercised by shared JSON fixtures in `conformance/plugin-presentation/`. |
 | Missing-explanation and enum-mismatch diagnostics as warnings | Presentation Profile §9.3 | Implemented in the SDK (`displayDiagnostics`) |
 | Generator skeleton; preserving operation title, descriptions, interpolated title, links, enum titles, field order, and `governedByDefault: false` | §9 | Implemented |
-| Generator preserving publisher-written field titles | §9.2 | **Not implemented**: regeneration replaces a field's title with the schema title |
-| Generator reports of changed tool definitions, default governed-set changes, possibly stale explanations, and references made invalid by regeneration | §9.2, Presentation Profile §9.3 | **Not implemented** |
+| Generator preserving publisher-written field titles | §9.2 | Implemented, including authored parent fields and bounded recursive-schema expansion. |
+| Generator reports of changed tool definitions, default governed-set changes, possibly stale explanations, and references made invalid by regeneration | §9.2, Presentation Profile §9.3 | Implemented in `build-artifacts/plugin-review.txt`; invalid references fail generation without rewriting authored templates. |
 | Credential Adapter routing with `governedByDefault` | Application Plugin Profile §8.2; MCP Profile §5 | Implemented in the CLI. Inactive until the CLI depends on an SDK release that loads version 2 |
-| Showing governed-set changes in acceptance tooling, such as the CLI trust prompt | Application Plugin Profile §8.2 | **Not implemented**. Operators today review the plugin file directly or with an assistant; the release report (§9.2) covers that case |
+| Showing governed-set changes in acceptance tooling, such as the CLI trust prompt | Application Plugin Profile §8.2 | Implemented in the CLI acceptance prompt. The last accepted effective governed set is stored under `.mpas-accepted-plugins/` in the configuration directory. |
 | Client-owned review context | Presentation Profile §4 | **Not implemented**; maintainer clients |
-| `reviewArtifact` in the SDK's Approval builder and verifier | Core §5.5.5.1, §5.5.7 | **Not implemented**. The current SDK rejects an Approval payload containing it as an unknown member, which fails closed |
-| Verifier check against the loaded plugin (`REVIEW_ARTIFACT_MISMATCH`), reported in `ignoredApprovals` whatever the result, including execution | Application Plugin Profile §13.2 | **Not implemented** in the Credential Adapter. The configured `artifactDid` it compares with is already verified when the plugin loads. The reference SDK fails the whole Approval Bundle when any Approval is invalid; the [approvals update feature record](../approvals-update/spec.md) changes that |
-| Expected-artifact hint: `expectedReviewArtifact` from the Credential Adapter, forwarded by the Proposer and Coordination to reviewer clients | Application Plugin Profile §13.2; HTTP Profile §6.4, §7.3, §8.4, §8.5 | **Not implemented** |
+| `reviewArtifact` in the SDK's Approval builder and verifier | Core §5.5.5.1, §5.5.7 | Implemented in the SDK builder and verification APIs. |
+| Verifier check against the loaded plugin (`REVIEW_ARTIFACT_MISMATCH`), reported in `ignoredApprovals` whatever the result, including execution | Application Plugin Profile §13.2 | Implemented in the Credential Adapter, including successful execution diagnostics and fatal proposer failures. |
+| Expected-artifact hint: `expectedReviewArtifact` from the Credential Adapter, forwarded by the Proposer and Coordination to reviewer clients | Application Plugin Profile §13.2; HTTP Profile §6.4, §7.3, §8.4, §8.5 | Implemented in the adapter, SDK coordination client, persistent bridge workflow, and MPAS local coordination service. The separate coordination-server repo and maintainer clients are deferred. |
 | Trusted artifact selection preferring an accepted hinted artifact, pinning, restart, naming the artifact actually used in Approvals, the may-not-count warning, and explicit generic review | Presentation Profile §3 | **Not implemented** in reviewer clients. The Verifier's per-request tool-surface check exists (HTTP Profile §6.3) |
 | Review records | Presentation Profile §12 | **Not implemented** |
-| Shared conformance fixtures in `conformance/plugin-presentation/` | Presentation Profile §14 | **Not implemented** |
+| Shared conformance fixtures in `conformance/plugin-presentation/` | Presentation Profile §14 | Starter set of nine language-neutral cases for pointers, formatting, links, remainder, and fallbacks. Resource limits have SDK unit-test coverage; shared limit fixtures remain to be added. |
 
 Implementation locations:
 

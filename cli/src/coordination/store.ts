@@ -14,7 +14,7 @@ import type {
   Hash,
   ThresholdRequirement,
 } from "../core/types.js";
-import { computeIdempotencyFingerprint, evaluateApprovalRequirements } from "@oma3/mpas";
+import { computeIdempotencyFingerprint, evaluateApprovalRequirements, readApprovalRequirements } from "@oma3/mpas";
 import { computeJsonHash } from "../core/verification.js";
 import type {
   ActionRef,
@@ -50,6 +50,7 @@ interface StoredApproval {
 }
 
 interface StoredAction {
+  expectedReviewArtifact?: Did;
   actionPackage: ActionPackage;
   authorizationRequirements: CoordinationActionRequest["authorizationRequirements"];
   actionRef: ActionRef;
@@ -283,6 +284,7 @@ export class CoordinationStore {
     const stored: StoredAction = {
       actionPackage: request.actionPackage,
       authorizationRequirements: request.authorizationRequirements,
+      expectedReviewArtifact: request.expectedReviewArtifact,
       actionRef,
       state: "awaitingApprovals",
       approvals: [],
@@ -599,7 +601,9 @@ export class CoordinationStore {
       return undefined;
     }
 
-    const decision = requirement?.decision ?? (override?.permissions.includes("approve") ? "approve" : "reject");
+    const decision = requirement
+      ? requirement.decision ?? "approve"
+      : override?.permissions.includes("approve") ? "approve" : "reject";
     const alreadyResponded = stored.approvals.some((entry) => entry.signerDid === did);
     if (alreadyResponded) {
       return undefined;
@@ -616,6 +620,7 @@ export class CoordinationStore {
     return {
       version: "1",
       type: "ApprovalRequest",
+      ...(stored.expectedReviewArtifact ? { expectedReviewArtifact: stored.expectedReviewArtifact } : {}),
       actionRef: stored.actionRef,
       signerReviewSet,
       requestedDecision: decision,
@@ -689,40 +694,11 @@ function buildCompletedActionPackage(stored: StoredAction): ActionPackage {
 }
 
 function progressFor(requirements: ApprovalRequirements, approvals: StoredApproval[]): CoordinationProgress {
-  const thresholds = thresholdsFor(requirements);
-  const threshold = thresholds.find((candidate) => !isThresholdSatisfied(candidate, approvals)) ?? thresholds[0];
-  if (!threshold) {
-    return {
-      required: 0,
-      collected: 0,
-      pending: [],
-    };
-  }
-
-  const decision = threshold.decision ?? "approve";
-  const approved = approvedSignersFor(threshold, decision, approvals);
-  return {
-    required: threshold.threshold,
-    collected: Math.min(approved.size, threshold.threshold),
-    pending: threshold.eligibleSigners.filter((did) => !approvals.some((entry) => entry.signerDid === did)),
-  };
-}
-
-function isThresholdSatisfied(threshold: ThresholdRequirement, approvals: StoredApproval[]): boolean {
-  return approvedSignersFor(threshold, threshold.decision ?? "approve", approvals).size >= threshold.threshold;
-}
-
-function approvedSignersFor(threshold: ThresholdRequirement, decision: Decision, approvals: StoredApproval[]): Set<Did> {
-  const eligible = new Set(threshold.eligibleSigners);
-  return new Set(
-    approvals
-      .filter((entry) => entry.signerDid && eligible.has(entry.signerDid) && entry.decision === decision)
-      .map((entry) => entry.signerDid as Did),
-  );
+  return readApprovalRequirements(requirements, approvals).progress;
 }
 
 function thresholdsFor(requirements: ApprovalRequirements): ThresholdRequirement[] {
-  return [...(requirements.anyOf ?? []), ...(requirements.allOf ?? [])];
+  return readApprovalRequirements(requirements).thresholds;
 }
 
 function validateActionPackageBindings(actionPackage: ActionPackage): void {
@@ -766,25 +742,8 @@ function validateAuthorizationRequirements(
       !isRecord(raw.approvalRequirements)) {
     throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization Requirements are malformed.");
   }
-  for (const field of ["anyOf", "allOf"] as const) {
-    const entries = raw.approvalRequirements[field];
-    if (entries !== undefined && !Array.isArray(entries)) {
-      throw new MpasServiceError(400, "INVALID_REQUEST", `approvalRequirements.${field} must be an array.`);
-    }
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (!isRecord(entry) || entry.type !== "threshold" || !Array.isArray(entry.eligibleSigners) ||
-          entry.eligibleSigners.some((did) => typeof did !== "string" || !did.startsWith("did:"))) {
-        throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization threshold is malformed.");
-      }
-    }
-  }
-  const rawOverrides = raw.approvalRequirements.overrideSigners;
-  if (rawOverrides !== undefined && (!Array.isArray(rawOverrides) || rawOverrides.some((entry) =>
-    !isRecord(entry) || typeof entry.signer !== "string" || !entry.signer.startsWith("did:") ||
-    !Array.isArray(entry.permissions) || entry.permissions.length === 0 ||
-    entry.permissions.some((permission) => typeof permission !== "string")))) {
-    throw new MpasServiceError(400, "INVALID_REQUEST", "Authorization override Signers are malformed.");
-  }
+  try { readApprovalRequirements(raw.approvalRequirements); }
+  catch { throw new MpasServiceError(400, "INVALID_REQUEST", "Approval requirements are malformed, unachievable, or exceed limits."); }
 
   if (requirements.result !== "additionalApprovalsRequired") {
     throw new MpasServiceError(400, "INVALID_REQUEST", "Approval workflow requires additional-approval requirements.");

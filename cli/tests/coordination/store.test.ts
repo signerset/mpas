@@ -21,6 +21,18 @@ const FIXTURE_NOW = Date.parse("2026-06-05T19:00:00.000Z");
 const adapterDid = "did:web:adapter.local" as Did;
 
 describe("CoordinationStore", () => {
+  it("forwards the artifact hint and collects nested alternatives with composite progress", async () => {
+    const request = await coordinationActionRequest();
+    const existing = request.authorizationRequirements.approvalRequirements.anyOf!;
+    for (const item of existing) if (item.type === "threshold") delete item.decision;
+    request.expectedReviewArtifact = "did:artifact:hint";
+    request.authorizationRequirements.approvalRequirements = { anyOf: [{ type:'allOf', requirements: existing }, { type:'threshold', threshold:1, eligibleSigners:[(await fixtureKey('maintainer-b')).did] }] };
+    const store = new CoordinationStore({now:FIXTURE_NOW});
+    store.createWorkflow(request);
+    expect(store.poll((await fixtureKey('maintainer-a')).did).approvalRequests[0]).toMatchObject({expectedReviewArtifact:'did:artifact:hint', requestedDecision:'approve'});
+    const progress = store.poll(request.actionPackage.actionEnvelope.proposer.did).actionUpdates[0].progress!;
+    expect(progress.required).toBeUndefined(); expect(progress.pending).toHaveLength(2);
+  });
   it("stores pending actions and returns signer-specific approval requests", async () => {
     const request = await coordinationActionRequest();
     const store = new CoordinationStore({ now: FIXTURE_NOW });
@@ -175,13 +187,13 @@ describe("CoordinationStore", () => {
     const cases: CoordinationActionRequest[] = [];
 
     const unachievable = structuredClone(request);
-    unachievable.authorizationRequirements.approvalRequirements.anyOf![0].threshold = 3;
+    (unachievable.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).threshold = 3;
     cases.push(unachievable);
 
     const duplicate = structuredClone(request);
-    duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners = [
-      duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners[0],
-      duplicate.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners[0],
+    (duplicate.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).eligibleSigners = [
+      (duplicate.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).eligibleSigners[0],
+      (duplicate.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).eligibleSigners[0],
     ];
     cases.push(duplicate);
 
@@ -231,8 +243,8 @@ describe("CoordinationStore", () => {
     const store = new CoordinationStore({ now: FIXTURE_NOW });
     const proposer = await fixtureKey("proposer");
 
-    request.authorizationRequirements.approvalRequirements.anyOf![0].threshold = 1;
-    request.authorizationRequirements.approvalRequirements.anyOf![0].eligibleSigners.push(proposer.did);
+    (request.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).threshold = 1;
+    (request.authorizationRequirements.approvalRequirements.anyOf![0] as import("@oma3/mpas").ThresholdRequirement).eligibleSigners.push(proposer.did);
     store.createWorkflow(request);
 
     const selfApproval = await signApproval(request.authorizationRequirements.actionEnvelopeHash, proposer, "approve");

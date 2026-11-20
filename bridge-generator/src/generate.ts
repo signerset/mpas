@@ -9,6 +9,7 @@
  * the plugin stay removed (spec.md §5). Identity fields and reviewed impacts
  * in the old plugin are preserved; descriptions/schemas refresh from discovery.
  */
+import { loadPlugin, validateOperationDisplay } from "@oma3/mpas";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -29,7 +30,7 @@ import {
   type HarnessConfig,
 } from "./artifacts.js";
 import { generateBridge, generateToolsJson, generateWorkflowStore } from "./bridge-codegen.js";
-import { generatePlugin } from "./plugin-codegen.js";
+import { generatePlugin, mergeGeneratedDisplay } from "./plugin-codegen.js";
 import { discoverUpstream } from "./discovery.js";
 import type { CredentialRequirement, GeneratedPlugin, McpToolDefinition, UpstreamInfo } from "./types.js";
 
@@ -98,33 +99,36 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
 
   // Prior state must be read before the generated surface is overwritten:
   // regeneration membership is derived from old snapshot − old plugin.
-  const previousSnapshot = await readJsonIfExists<{ tools?: Array<{ name: string }> }>(
+  const previousSnapshot = await readJsonIfExists<{ tools?: McpToolDefinition[] }>(
     join(appDir, "build-artifacts", "tools-list.snapshot.json"),
   );
   const previousPlugin = await readJsonIfExists<Partial<GeneratedPlugin>>(join(appDir, "plugin.json"));
+  const previousMetadata = await readJsonIfExists<{ defaultGovernedOperations?: string[] }>(
+    join(appDir, "build-artifacts", "metadata.json"),
+  );
   const previousCredentialRequirements = previousPlugin?.credentialRequirements === undefined
     ? undefined
     : validateCredentialRequirements(previousPlugin.credentialRequirements);
 
   // --- build-artifacts ---
   const snapshot = buildToolsListSnapshot(upstream.tools);
-  await writeGenerated("build-artifacts/tools-list.snapshot.json", jsonFile(snapshot));
 
   const metadata = buildDiscoveryMetadata(upstream, {
     protocolVersion: upstream.protocolVersion,
     generatorVersion: GENERATOR_VERSION,
     capturedAt: options.capturedAt,
   });
-  await writeGenerated("build-artifacts/metadata.json", jsonFile(metadata));
 
   const classification = await mergedClassification(appDir, upstream);
   await writeGenerated("build-artifacts/classification.json", jsonFile(classification));
 
   // --- plugin.json ---
-  // Membership in plugin.operations is the governance control (Application
-  // Plugin profile): tools the reviewer deleted from an existing plugin are
-  // intentional pass-through and must not be re-added. classification.json is
-  // advisory only and never drives membership.
+  // Membership in plugin.operations is the publisher's control over which
+  // tools the plugin describes (Application Plugin profile): tools the
+  // reviewer deleted from an existing plugin are intentional pass-through and
+  // must not be re-added. A described tool is governed by default unless the
+  // publisher set governedByDefault: false, which regeneration preserves.
+  // classification.json is advisory only and never drives membership.
   const governedTools = selectGovernedTools(snapshot.tools, previousPlugin, previousSnapshot, log);
   const plugin = JSON.parse(generatePlugin(governedTools, upstream.protocolVersion)) as GeneratedPlugin;
   plugin.toolSurface = { hash: snapshot.toolSurface, toolNames: snapshot.tools.map(tool => tool.name) };
@@ -145,8 +149,47 @@ export async function runGenerate(options: GenerateOptions): Promise<void> {
     } else if (classification.operations[name]) {
       operation.impact = classification.operations[name].impact;
     }
+    if (previousOperation?.governedByDefault === false) operation.governedByDefault = false;
+    if (operation.display) operation.display = mergeGeneratedDisplay(operation.display, previousOperation?.display, operation.executionPayloadSchema,
+      previousSnapshot?.tools?.find(tool => tool.name === name) ? (JSON.parse(generatePlugin([previousSnapshot.tools.find(tool => tool.name === name)!], upstream.protocolVersion)) as GeneratedPlugin).operations[name]?.display : undefined);
   }
+  const report: string[] = [];
+  for (const tool of snapshot.tools) {
+    const old = previousSnapshot?.tools?.find(item => item.name === tool.name);
+    if (old && canonicalize(old) !== canonicalize(tool)) {
+      report.push(`Changed tool definition: ${tool.name}. Preserved titles, descriptions and enum explanations may be stale; review them.`);
+      const display = previousPlugin?.operations?.[tool.name]?.display;
+      if (display) {
+        report.push(`Review preserved operation title/description: ${tool.name}`);
+        for (const field of display.fields) {
+          report.push(`Review preserved field title/description: ${tool.name} ${field.path}`);
+          for (const entry of field.params?.values ?? []) report.push(`Review preserved enum wording: ${tool.name} ${field.path} ${JSON.stringify(entry.value)}`);
+        }
+      }
+    }
+  }
+  for (const old of previousSnapshot?.tools ?? []) if (!snapshot.tools.some(tool => tool.name === old.name)) report.push(`Removed tool definition: ${old.name}`);
+  const governed = (p: Partial<GeneratedPlugin> | undefined) => new Set(Object.entries(p?.operations ?? {}).filter(([, op]) => op.governedByDefault !== false).map(([name]) => name));
+  // The prior generation's baseline also detects edits to governance made by
+  // the publisher between runs, before we read their current plugin.json.
+  const before = previousMetadata?.defaultGovernedOperations
+    ? new Set(previousMetadata.defaultGovernedOperations)
+    : governed(previousPlugin);
+  const after = governed(plugin);
+  for (const name of after) if (!before.has(name)) report.push(`Now governed by default: ${name}`);
+  for (const name of before) if (!after.has(name)) report.push(`No longer governed by default: ${name}`);
+  for (const [name, operation] of Object.entries(plugin.operations)) {
+    for (const diagnostic of validateOperationDisplay(name, operation)) report.push(`${diagnostic.severity}: ${diagnostic.location}: ${diagnostic.message}`);
+  }
+  await writeGenerated("build-artifacts/plugin-review.txt", report.join("\n") + "\n");
+  for (const line of report) log(line);
   await writeGenerated("plugin.json", jsonFile(plugin));
+  const validated = await loadPlugin(join(appDir, "plugin.json"));
+  if (!validated.ok) throw new GenerateError(`Generated plugin needs correction: ${validated.error.message}. See build-artifacts/plugin-review.txt.`);
+  // Keep the old comparison baseline if validation fails, so another run
+  // still reports the changes that need review.
+  await writeGenerated("build-artifacts/tools-list.snapshot.json", jsonFile(snapshot));
+  await writeGenerated("build-artifacts/metadata.json", jsonFile({ ...metadata, defaultGovernedOperations: [...after].sort() }));
 
   // --- harness-config.json (merge preserves manual edits) ---
   const harnessConfig = await mergedHarnessConfig(appDir, upstream);
@@ -319,7 +362,7 @@ async function readJsonIfExists<T>(path: string): Promise<T | undefined> {
 function selectGovernedTools(
   tools: McpToolDefinition[],
   previousPlugin: Partial<GeneratedPlugin> | undefined,
-  previousSnapshot: { tools?: Array<{ name: string }> } | undefined,
+  previousSnapshot: { tools?: McpToolDefinition[] } | undefined,
   log: (message: string) => void,
 ): McpToolDefinition[] {
   if (!previousPlugin) {

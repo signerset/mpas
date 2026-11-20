@@ -151,7 +151,7 @@ describe("official MCP Tasks bridge runtime", () => {
 
   it("returns transparent MPAS metadata from the signed Action Package while working", async () => {
     const requirements = {
-      anyOf: [{ type: "threshold" as const, threshold: 2, eligibleSigners: [PROPOSER_DID] }],
+      anyOf: [{ type: "threshold" as const, threshold: 2, eligibleSigners: [PROPOSER_DID, OTHER_DID] }],
     };
     const bridge = makeBridge(
       fakeAdapter(

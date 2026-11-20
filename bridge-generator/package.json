@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "json-canonicalize": "2.0.0",
-    "multiformats": "^14.0.4"
+    "multiformats": "^14.0.4",
+    "@oma3/mpas": "file:../sdk/protocol"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",

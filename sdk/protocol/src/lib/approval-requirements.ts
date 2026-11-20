@@ -1,4 +1,5 @@
-import type { ApprovalRequirements, Decision, Did, ThresholdRequirement } from "../types/mpas.js";
+import { parseApprovalRequirements } from "./approval-requirements-schema.js";
+import type { ApprovalRequirements, Decision, Did, ThresholdRequirement, RequirementItem, CoordinationProgress } from "../types/mpas.js";
 
 /** One Signer's final decision for one Action Envelope. */
 export interface SignerDecision {
@@ -29,6 +30,7 @@ export function evaluateApprovalRequirements(
   requirements: ApprovalRequirements,
   decisions: Iterable<SignerDecision>,
 ): ApprovalRequirementsStatus {
+  requirements = parseApprovalRequirements(requirements);
   const decisionsBySigner = immutableDecisionMap(decisions);
   const overrides = requirements.overrideSigners ?? [];
 
@@ -43,12 +45,12 @@ export function evaluateApprovalRequirements(
 
   const anyOf = requirements.anyOf ?? [];
   const allOf = requirements.allOf ?? [];
-  const anyOfSatisfied = anyOf.length === 0 || anyOf.some((entry) => thresholdStatus(entry, decisionsBySigner) === "satisfied");
-  const allOfSatisfied = allOf.every((entry) => thresholdStatus(entry, decisionsBySigner) === "satisfied");
+  const anyOfSatisfied = anyOf.length === 0 || anyOf.some((entry) => itemStatus(entry, decisionsBySigner) === "satisfied");
+  const allOfSatisfied = allOf.every((entry) => itemStatus(entry, decisionsBySigner) === "satisfied");
   if (anyOfSatisfied && allOfSatisfied) return "satisfied";
 
-  const anyOfReachable = anyOf.length === 0 || anyOf.some((entry) => thresholdStatus(entry, decisionsBySigner) !== "unreachable");
-  const allOfReachable = allOf.every((entry) => thresholdStatus(entry, decisionsBySigner) !== "unreachable");
+  const anyOfReachable = anyOf.length === 0 || anyOf.some((entry) => itemStatus(entry, decisionsBySigner) !== "unreachable");
+  const allOfReachable = allOf.every((entry) => itemStatus(entry, decisionsBySigner) !== "unreachable");
   if (anyOfReachable && allOfReachable) return "pending";
 
   const pendingApproveOverride = overrides.some((entry) =>
@@ -83,4 +85,57 @@ function thresholdStatus(
   }
   if (matching >= requirement.threshold) return "satisfied";
   return matching + undecided >= requirement.threshold ? "pending" : "unreachable";
+}
+
+function itemStatus(item: RequirementItem, decisions: ReadonlyMap<Did, Decision>): ApprovalRequirementsStatus {
+  if (item.type === "threshold") return thresholdStatus(item, decisions);
+  const statuses = item.requirements.map(child => itemStatus(child, decisions));
+  if (item.type === "allOf") {
+    if (statuses.every(status => status === "satisfied")) return "satisfied";
+    return statuses.includes("unreachable") ? "unreachable" : "pending";
+  }
+  if (statuses.includes("satisfied")) return "satisfied";
+  return statuses.every(status => status === "unreachable") ? "unreachable" : "pending";
+}
+
+/** Validated shared coordination projection. No signature or trust decisions. */
+export function readApprovalRequirements(
+  value: unknown,
+  decisions: Iterable<SignerDecision> = [],
+) {
+  const requirements = parseApprovalRequirements(value);
+  const thresholds: ThresholdRequirement[] = [];
+  const visit = (item: RequirementItem): void => {
+    if (item.type === "threshold") {
+      if (new Set(item.eligibleSigners).size !== item.eligibleSigners.length || item.threshold > item.eligibleSigners.length) {
+        throw new TypeError("Approval thresholds require unique eligible signers and must be achievable");
+      }
+      thresholds.push(item);
+    } else {
+      item.requirements.forEach(visit);
+    }
+  };
+  [...requirements.anyOf ?? [], ...requirements.allOf ?? []].forEach(visit);
+  const eligibleSigners = [...new Set([
+    ...thresholds.flatMap(threshold => threshold.eligibleSigners),
+    ...(requirements.overrideSigners ?? []).map(override => override.signer),
+  ])];
+  const decisionList = [...decisions];
+  const bySigner = immutableDecisionMap(decisionList);
+  const progress: CoordinationProgress = { pending: eligibleSigners.filter(did => !bySigner.has(did)) };
+  if (thresholds.length === 1 && !(requirements.overrideSigners?.length)) {
+    const threshold = thresholds[0]!;
+    progress.required = threshold.threshold;
+    progress.collected = Math.min(
+      threshold.threshold,
+      threshold.eligibleSigners.filter(did => bySigner.get(did) === (threshold.decision ?? "approve")).length,
+    );
+  }
+  return {
+    requirements,
+    thresholds,
+    eligibleSigners,
+    progress,
+    status: evaluateApprovalRequirements(requirements, decisionList),
+  };
 }

@@ -1,3 +1,4 @@
+import { parseApprovalRequirements } from "./approval-requirements-schema.js";
 import type { UnmetRequirement, UnsatisfiedThreshold } from "./policy-engine.js";
 import type {
   ActionEnvelope,
@@ -13,37 +14,25 @@ import { computeJsonHash } from "./verification.js";
 export interface BuildAuthorizationRequirementsInput {
   /** Action Envelope whose exact hash the requirements authorize. */
   actionEnvelope: ActionEnvelope;
+  /** Complete combined requirements returned by evaluatePolicy. */
+  approvalRequirements?: ApprovalRequirements;
   /**
-   * Unmet requirement tree from `evaluatePolicy`. Preferred over
-   * `unsatisfiedRules` because it keeps allOf/anyOf structure.
+   * @deprecated Pass approvalRequirements to include already-satisfied branches.
    */
   unmetRequirement?: UnmetRequirement;
   /**
    * Flat list of unmet thresholds, treated as all required. Ignored when
-   * `unmetRequirement` is present.
+   * `approvalRequirements` or `unmetRequirement` is present.
    *
-   * @deprecated Pass `unmetRequirement`.
+   * @deprecated Pass `approvalRequirements`.
    */
   unsatisfiedRules?: UnsatisfiedThreshold[];
   /** DID of the Verifier that evaluated the Action. */
   verifierDid: Did;
 }
 
-/**
- * Constructs Authorization Requirements from the unmet result of Verifier policy evaluation.
- *
- * MPAS Core §5.8.5 can express one `anyOf` group of thresholds plus any number
- * of `allOf` thresholds, all of which must hold. Unmet trees of that shape are
- * represented exactly. A deeper tree (an anyOf alternative that needs several
- * thresholds, or an allOf over several anyOf groups) is reduced to one
- * sufficient path by taking the first alternative of each anyOf that does not
- * fit, so collecting the returned approvals always satisfies the unmet
- * requirement, but some alternatives are not listed.
- *
- * Counts of approvals already found are not included: the §5.8.6 threshold
- * object has no field for them, and a replacement Action needs fresh Approvals.
- *
- * @throws {TypeError} If there is no unmet requirement to describe.
+/** Constructs advisory requirements. Pass evaluatePolicy's complete approvalRequirements.
+ * Legacy unmet inputs remain available for older callers, but cannot recover satisfied branches.
  */
 export function buildAuthorizationRequirements(
   input: BuildAuthorizationRequirementsInput,
@@ -59,15 +48,13 @@ export function buildAuthorizationRequirements(
   legacyUnsatisfiedRules?: UnsatisfiedThreshold[],
   legacyVerifierDid?: Did,
 ): AuthorizationRequirements {
-  const { actionEnvelope, unmetRequirement, unsatisfiedRules, verifierDid }: BuildAuthorizationRequirementsInput =
-    "actionEnvelope" in inputOrEnvelope
-      ? inputOrEnvelope
-      : {
-          actionEnvelope: inputOrEnvelope,
-          unsatisfiedRules: legacyUnsatisfiedRules ?? [],
-          verifierDid: legacyVerifierDid as Did,
-        };
-  const unmet = unmetRequirement ?? unmetFromFlatList(unsatisfiedRules ?? []);
+  const input: BuildAuthorizationRequirementsInput = "actionEnvelope" in inputOrEnvelope ? inputOrEnvelope : {
+    actionEnvelope: inputOrEnvelope, unsatisfiedRules: legacyUnsatisfiedRules, verifierDid: legacyVerifierDid!,
+  };
+  const { actionEnvelope, verifierDid } = input;
+  const requirements = input.approvalRequirements
+    ? parseApprovalRequirements(input.approvalRequirements)
+    : toApprovalRequirements(input.unmetRequirement ?? unmetFromFlatList(input.unsatisfiedRules ?? []));
   return {
     version: "1",
     type: "AuthorizationRequirements",
@@ -76,7 +63,7 @@ export function buildAuthorizationRequirements(
     verifier: {
       did: verifierDid,
     },
-    approvalRequirements: toApprovalRequirements(unmet),
+    approvalRequirements: requirements,
     createdAt: new Date().toISOString(),
     expiresAt: actionEnvelope.expiresAt,
   };
@@ -94,39 +81,10 @@ function unmetFromFlatList(unsatisfiedRules: UnsatisfiedThreshold[]): UnmetRequi
 }
 
 function toApprovalRequirements(unmet: UnmetRequirement): ApprovalRequirements {
-  const collected: { anyOf?: ThresholdRequirement[]; allOf: ThresholdRequirement[] } = { allOf: [] };
-  collect(normalize(unmet), collected);
-  const { anyOf, allOf } = collected;
-  if (anyOf === undefined) {
-    // A single required threshold reads the same either way; §5.8.5 recommends anyOf.
-    return allOf.length === 1 ? { anyOf: allOf } : { allOf };
-  }
-  return allOf.length === 0 ? { anyOf } : { anyOf, allOf };
-}
-
-/** Adds the thresholds needed to satisfy `node` to `into`, keeping at most one anyOf group. */
-function collect(
-  node: UnmetRequirement,
-  into: { anyOf?: ThresholdRequirement[]; allOf: ThresholdRequirement[] },
-): void {
-  switch (node.type) {
-    case "threshold":
-      into.allOf.push(toThresholdRequirement(node.unsatisfied));
-      return;
-    case "allOf":
-      for (const child of node.requirements) collect(child, into);
-      return;
-    case "anyOf": {
-      const alternatives = node.requirements;
-      if (into.anyOf === undefined && alternatives.every((alt) => alt.type === "threshold")) {
-        into.anyOf = alternatives.map((alt) => toThresholdRequirement(alt.unsatisfied));
-        return;
-      }
-      // Not expressible as the single anyOf group: commit to the first alternative.
-      collect(alternatives[0], into);
-      return;
-    }
-  }
+  const convert = (node: UnmetRequirement): import('../types/mpas.js').RequirementItem => node.type === 'threshold'
+    ? toThresholdRequirement(node.unsatisfied) : { type: node.type, requirements: node.requirements.map(convert) };
+  const root = convert(normalize(unmet));
+  return parseApprovalRequirements(root.type === 'threshold' ? { anyOf: [root] } : { [root.type]: root.requirements });
 }
 
 /** Flattens nested allOf-in-allOf and anyOf-in-anyOf and unwraps single-member groups. */

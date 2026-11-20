@@ -40,6 +40,7 @@ describe("runGenerate", () => {
     expect((await readdir(join(appDir, "build-artifacts"))).sort()).toEqual([
       "classification.json",
       "metadata.json",
+      "plugin-review.txt",
       "tools-list.snapshot.json",
     ]);
     expect((await readdir(join(appDir, "bridge"))).sort()).toEqual(["README.md", "package.json", "src", "tsconfig.json"]);
@@ -124,6 +125,7 @@ describe("runGenerate", () => {
     const after = await readAllFiles(appDir);
 
     for (const [file, contents] of Object.entries(before)) {
+      if (file.endsWith("plugin-review.txt")) continue; // Reports compare against the previous generation.
       if (file.endsWith("metadata.json")) {
         expect(after[file]).not.toBe(contents);
       } else {
@@ -189,7 +191,7 @@ describe("runGenerate", () => {
       publisherDid: string;
       applicationDid: string;
       credentialRequirements: unknown[];
-      operations: Record<string, { impact: string }>;
+      operations: Record<string, { impact: string; governedByDefault?: boolean }>;
     }>(pluginPath);
     plugin.pluginDid = "did:web:plugins.wivity.example:github";
     plugin.publisherDid = "did:web:wivity.example";
@@ -200,6 +202,7 @@ describe("runGenerate", () => {
       refreshScope: "offline_access",
     }];
     plugin.operations.create_issue.impact = "high";
+    plugin.operations.merge_pull_request.governedByDefault = false;
     await writeFile(pluginPath, `${JSON.stringify(plugin, null, 2)}\n`);
 
     await generate({ outDir: join(appDir, "..") });
@@ -214,6 +217,8 @@ describe("runGenerate", () => {
       refreshScope: "offline_access",
     }]);
     expect(regenerated.operations.create_issue.impact).toBe("high");
+    expect(regenerated.operations.merge_pull_request.governedByDefault).toBe(false);
+    expect(regenerated.operations.create_issue.governedByDefault).toBeUndefined();
     // --application-did still wins over the preserved value when given.
     await generate({ outDir: join(appDir, ".."), applicationDid: "did:web:override.example" });
     expect((await readJson<typeof plugin>(pluginPath)).applicationDid).toBe("did:web:override.example");
@@ -328,6 +333,52 @@ describe("regeneration plugin membership (spec §5: old snapshot − old plugin 
 
     await generate({ outDir: join(appDir, ".."), discover: discoverTools(["a", "b"]) });
     expect(await pluginOperations(appDir)).toEqual(["a"]);
+  });
+
+  it("reports governance edits against the previous generation", async () => {
+    const appDir = await generate({ discover: discoverTools(["a", "b", "c"]) });
+    const pluginPath = join(appDir, "plugin.json");
+    const plugin = await readJson<{ operations: Record<string, { governedByDefault?: boolean }> }>(pluginPath);
+    plugin.operations.a.governedByDefault = false;
+    delete plugin.operations.b;
+    await writeFile(pluginPath, JSON.stringify(plugin));
+    await generate({ outDir: join(appDir, ".."), discover: discoverTools(["a", "b", "c"]) });
+    const report = await readFile(join(appDir, "build-artifacts", "plugin-review.txt"), "utf8");
+    expect(report).toContain("No longer governed by default: a");
+    expect(report).toContain("No longer governed by default: b");
+  });
+
+  it("does not report reordered JSON object keys as a changed tool", async () => {
+    const base = await discoverTools(["a"])("node", []);
+    const first = { name: "a", inputSchema: { type: "object" as const, properties: { value: { type: "string", title: "Value" } } } };
+    const reordered = { inputSchema: { properties: { value: { title: "Value", type: "string" } }, type: "object" as const }, name: "a" };
+    const appDir = await generate({ discover: async () => ({ ...base, tools: [first] }) });
+    await generate({ outDir: join(appDir, ".."), discover: async () => ({ ...base, tools: [reordered] }) });
+    const report = await readFile(join(appDir, "build-artifacts", "plugin-review.txt"), "utf8");
+    expect(report).not.toContain("Changed tool definition:");
+  });
+
+  it("reports invalid preserved references and retains the comparison baseline until corrected", async () => {
+    const discover = (parameter: string) => async (command: string, args: string[]) => ({
+      ...await discoverTools(["a"])(command, args),
+      tools: [{ name: "a", inputSchema: { type: "object" as const, additionalProperties: false, properties: { [parameter]: { type: "string" } } } }],
+    });
+    const appDir = await generate({ discover: discover("old") });
+    const snapshotPath = join(appDir, "build-artifacts", "tools-list.snapshot.json");
+    const originalSnapshot = await readFile(snapshotPath, "utf8");
+    const pluginPath = join(appDir, "plugin.json");
+    const plugin = await readJson<{ operations: Record<string, { display: { interpolatedTitle?: string } }> }>(pluginPath);
+    plugin.operations.a.display.interpolatedTitle = "Act on {/arguments/old}";
+    await writeFile(pluginPath, JSON.stringify(plugin));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(generate({ outDir: join(appDir, ".."), discover: discover("new") })).rejects.toThrow(/Generated plugin needs correction/);
+      const report = await readFile(join(appDir, "build-artifacts", "plugin-review.txt"), "utf8");
+      expect(report).toContain("Changed tool definition: a");
+      expect(report).toContain("/arguments/old");
+      expect(await readFile(snapshotPath, "utf8")).toBe(originalSnapshot);
+      const written = await readJson<typeof plugin>(pluginPath);
+      expect(written.operations.a.display.interpolatedTitle).toBe("Act on {/arguments/old}");
+    }
   });
 
   it("without a previous snapshot, treats the existing plugin as authoritative and warns", async () => {

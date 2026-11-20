@@ -1,3 +1,5 @@
+import { mapPolicyRequirements } from "./requirement-mapping.js";
+import type { ApprovalRequirements } from "../types/mpas.js";
 /**
  * MPAS JSON Verifier Policy Engine
  *
@@ -156,15 +158,17 @@ export type PolicyResult =
   | { status: "rejected"; code: "ACTION_BLOCKED_BY_POLICY" | "CONFLICTING_SIGNER_DECISIONS"; message: string }
   | {
       status: "additionalApprovalsRequired";
-      /** Unmet requirement tree with allOf/anyOf preserved. Use this to build Authorization Requirements. */
+      /** Diagnostic tree of unmet requirements. @deprecated Build Authorization Requirements from `approvalRequirements`. */
       unmetRequirement: UnmetRequirement;
+      /** Complete applicable policy, including requirements already met by this submission. */
+      approvalRequirements: ApprovalRequirements;
       /**
        * Flat list of unmet thresholds that together form one sufficient path:
        * every allOf member, but only the first alternative of each unmet anyOf.
        * It carries no structure, so it cannot say which thresholds are
        * alternatives.
        *
-       * @deprecated Use `unmetRequirement`.
+       * @deprecated Use `approvalRequirements` to build Authorization Requirements.
        */
       unsatisfiedRules: UnsatisfiedThreshold[];
     }
@@ -232,6 +236,13 @@ export function validatePolicyConfig(policy: PolicyConfig): PolicyConfigValidati
     }
   }
 
+  try {
+    mapPolicyRequirements(policy.defaultRequirement, policy);
+    for (const entries of Object.values(policy.policies ?? {})) {
+      const requirements = entries.filter((e): e is RequirementPolicyEntry => e.reject !== true).map(e => e.requirements);
+      if (requirements.length) mapPolicyRequirements({ type: "allOf", requirements }, policy);
+    }
+  } catch (error) { return { ok: false, message: String(error) }; }
   return { ok: true };
 }
 
@@ -295,7 +306,9 @@ function validateRequirement(
   requirement: unknown,
   signerGroups: Record<string, Did[]>,
   path: string,
+  depth = 0,
 ): string | null {
+  if (depth > 64) return `${path} exceeds the policy nesting limit.`;
   if (!isRecord(requirement) || typeof requirement.type !== "string") {
     return `${path} must be an approval requirement object.`;
   }
@@ -335,7 +348,7 @@ function validateRequirement(
         return `${path}.requirements must be a non-empty array.`;
       }
       for (const [index, nested] of requirement.requirements.entries()) {
-        const nestedError = validateRequirement(nested, signerGroups, `${path}.requirements[${index}]`);
+        const nestedError = validateRequirement(nested, signerGroups, `${path}.requirements[${index}]`, depth + 1);
         if (nestedError) return nestedError;
       }
       return null;
@@ -471,6 +484,7 @@ export function evaluatePolicy(
   return {
     status: "additionalApprovalsRequired",
     unmetRequirement: unmet,
+    approvalRequirements: mapPolicyRequirements(effectiveRequirement, policy)!,
     unsatisfiedRules: firstSufficientPath(unmet),
   };
 }

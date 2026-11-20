@@ -153,6 +153,23 @@ describe("listSecurityReviewers", () => {
 });
 
 describe("formatTrustSummary", () => {
+  it("shows only governance changes and keeps the full set in details", () => {
+    const assessment = {
+      status: "checked" as const,
+      report: report({ declared: [claim(publisherDid)] }),
+      governance: { governed: ["unchanged", "added"], added: ["added"], removed: ["removed"], previousKnown: true },
+    };
+    const summary = formatTrustSummary(assessment, config);
+    expect(summary).toContain("Newly governed: added");
+    expect(summary).toContain("No longer governed: removed");
+    expect(summary).not.toContain("unchanged");
+    expect(formatTrustDetails(assessment, config)).toContain("    - unchanged");
+    const noChanges = formatTrustSummary({
+      ...assessment, governance: { ...assessment.governance, added: [], removed: [] },
+    }, config);
+    expect(noChanges).not.toContain("Newly governed:");
+    expect(noChanges).not.toContain("No longer governed:");
+  });
   it("names the parties and reviewers without a warning when the publisher vouched", () => {
     const text = formatTrustSummary({
       status: "checked",

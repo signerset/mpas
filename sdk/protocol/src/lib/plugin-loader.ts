@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import type { ExecutionPayload } from "../types/mpas.js";
+import type { ExecutionPayload, OperationDisplay } from "../types/mpas.js";
+import { validateOperationDisplay, type DisplayDiagnostic } from "./plugin-display.js";
 import { strictJsonParse } from "../utils/strict-json.js";
 
 export interface MpasApplicationPlugin {
-  version: "1";
+  version: "1" | "2";
   type: "MpasApplicationPlugin";
   pluginDid: string;
   pluginVersion: string;
@@ -29,6 +30,13 @@ export interface MpasOperationDescriptor {
   description?: string;
   impact?: string;
   executionPayloadSchema: Record<string, unknown>;
+  /**
+   * Plugin schema version 2 only. `false` marks an operation the publisher
+   * describes but does not govern by default; operator policy may still govern
+   * it. Absent or `true` means governed by default.
+   */
+  governedByDefault?: boolean;
+  display?: OperationDisplay;
 }
 
 export interface LoadError {
@@ -43,6 +51,8 @@ export type LoadPluginResult =
   | {
       ok: true;
       plugin: MpasApplicationPlugin;
+      /** Authoring gaps and non-blocking enum mismatches. They do not affect execution. */
+      displayDiagnostics: DisplayDiagnostic[];
     }
   | {
       ok: false;
@@ -72,6 +82,66 @@ export type PayloadValidationResult =
       error: PayloadValidationError;
     };
 
+const nonemptyString = { type: "string", minLength: 1 };
+const operationDisplaySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "fields"],
+  properties: {
+    title: nonemptyString,
+    description: nonemptyString,
+    interpolatedTitle: nonemptyString,
+    fields: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["path"],
+        properties: {
+          path: { type: "string" },
+          title: nonemptyString,
+          description: nonemptyString,
+          format: { enum: ["raw", "enum", "date"] },
+          params: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              type: { enum: ["date", "date-time"] },
+              values: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["value", "title"],
+                  properties: {
+                    value: { type: ["string", "number", "boolean", "null"] },
+                    title: nonemptyString,
+                    description: nonemptyString,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    links: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "urlTemplate"],
+        properties: {
+          title: nonemptyString,
+          description: nonemptyString,
+          urlTemplate: nonemptyString,
+          variables: { type: "object", additionalProperties: { type: "string" } },
+        },
+      },
+    },
+  },
+};
+
 const applicationPluginSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
@@ -94,7 +164,7 @@ const applicationPluginSchema = {
         toolNames: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } },
       },
     },
-    version: { const: "1" },
+    version: { enum: ["1", "2"] },
     type: { const: "MpasApplicationPlugin" },
     pluginDid: { type: "string", pattern: "^did:[a-z0-9]+:.+" },
     pluginVersion: { type: "string", minLength: 1 },
@@ -134,6 +204,8 @@ const applicationPluginSchema = {
           description: { type: "string" },
           impact: { type: "string" },
           executionPayloadSchema: { type: "object" },
+          governedByDefault: { type: "boolean" },
+          display: operationDisplaySchema,
         },
         additionalProperties: false,
       },
@@ -219,6 +291,8 @@ export async function loadPlugin(path: string): Promise<LoadPluginResult> {
   }
 
   const plugin = parsed as unknown as MpasApplicationPlugin;
+  const displayCheck = checkDisplay(plugin, path);
+  if (!displayCheck.ok) return displayCheck.result;
   const schemasCheck = checkOperationSchemaResources(plugin.operations);
   if (!schemasCheck.ok) {
     return resourceLoadError(schemasCheck.resource, schemasCheck.message, path, schemasCheck.path, schemasCheck.actual, schemasCheck.limit);
@@ -227,6 +301,7 @@ export async function loadPlugin(path: string): Promise<LoadPluginResult> {
   return {
     ok: true,
     plugin,
+    displayDiagnostics: displayCheck.diagnostics,
   };
 }
 
@@ -541,6 +616,33 @@ function checkOperationSchemaResources(operations: Record<string, MpasOperationD
     }
   }
   return { ok: true };
+}
+
+function checkDisplay(
+  plugin: MpasApplicationPlugin,
+  path: string,
+): { ok: true; diagnostics: DisplayDiagnostic[] } | { ok: false; result: LoadPluginResult } {
+  const diagnostics: DisplayDiagnostic[] = [];
+  for (const [name, operation] of Object.entries(plugin.operations)) {
+    if (plugin.version === "1") {
+      const v2Only = ["display", "governedByDefault"].find((key) => Object.hasOwn(operation, key));
+      if (v2Only) {
+        return {
+          ok: false,
+          result: loadError("PLUGIN_SCHEMA_INVALID", `Plugin schema version 1 cannot contain ${v2Only} on operation ${name}.`, path),
+        };
+      }
+    }
+    diagnostics.push(...validateOperationDisplay(name, operation));
+  }
+  const failure = diagnostics.find((diagnostic) => diagnostic.severity === "error");
+  if (!failure) return { ok: true, diagnostics: diagnostics.filter((diagnostic) => diagnostic.severity === "warning") };
+  return {
+    ok: false,
+    result: failure.resource
+      ? resourceLoadError(failure.code, failure.message, path, failure.location, failure.resource.actual, failure.resource.limit)
+      : loadError("PLUGIN_SCHEMA_INVALID", failure.message, path, diagnostics.filter((diagnostic) => diagnostic.severity === "error")),
+  };
 }
 
 function loadError(code: LoadError["code"], message: string, path: string, details?: unknown): LoadPluginResult {

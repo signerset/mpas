@@ -6,9 +6,9 @@ import type { PluginTrustReport } from "./trust.js";
 import type { AttestationSummary } from "./trust-attestation.js";
 import type { DeploymentConfig } from "./config-loader.js";
 
-export type PluginTrustAssessment =
+export type PluginTrustAssessment = { governance?: { governed: string[]; added: string[]; removed: string[]; previousKnown: boolean } } & (
   | { status: "checked"; report: PluginTrustReport }
-  | { status: "notChecked"; reason: "unavailable"; detail?: string };
+  | { status: "notChecked"; reason: "unavailable"; detail?: string });
 
 export type ConfirmPluginUse = (
   assessment: PluginTrustAssessment,
@@ -21,7 +21,7 @@ export const NO_PRIMARY_TRUST_EVIDENCE_WARNING =
   "Neither the declared publisher nor an approved assessor has vouched for this plugin: no responsibility claim or cybersecurity assessment from either was found.";
 export const RESPONSIBILITY_CLAIM_TRUST_NOTICE =
   "If you trust just one of the URLs you should use the plugin.";
-export const DETAILS_HINT = "Press D to see all attestations.";
+export const DETAILS_HINT = "Press D for governed operations and all attestations.";
 export const INDEPENDENT_VERIFY_NOTICE =
   "You can independently verify this artifact at https://app.omatrust.org/verify using its did:artifact:";
 
@@ -201,6 +201,16 @@ export function formatTrustSummary(
   style: TrustTextStyle = PLAIN_STYLE,
 ): string {
   const lines = [`Plugin: ${style.strong(config.name)}`];
+  if (assessment.governance) {
+    const g = assessment.governance;
+    const names = (items: string[]) => items.map(sanitizeForTerminal).join(", ");
+    if (g.previousKnown) {
+      if (g.added.length) lines.push(`  Newly governed: ${names(g.added)}`);
+      if (g.removed.length) lines.push(`  No longer governed: ${names(g.removed)}`);
+    } else {
+      lines.push("  No previously accepted governed set is available for comparison.");
+    }
+  }
 
   if (assessment.status === "notChecked") {
     lines.push(
@@ -274,6 +284,10 @@ export function formatTrustDetails(
     "  Content integrity: verified (plugin content matches the configured did:artifact)",
   ];
   const verify = [`  ${INDEPENDENT_VERIFY_NOTICE}`, `    ${config.plugin.artifactDid}`];
+  if (assessment.governance) {
+    const governed = assessment.governance.governed.map(sanitizeForTerminal);
+    lines.push(`  Governed operations (${governed.length}):`, ...governed.map(name => `    - ${name}`));
+  }
   if (assessment.status === "notChecked") {
     lines.push("  OMATrust information could not be loaded.", ...verify);
     return `${lines.join("\n")}\n`;

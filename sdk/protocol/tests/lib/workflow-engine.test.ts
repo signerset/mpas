@@ -133,6 +133,7 @@ function makeEngine(opts: {
   upstreamBinding?: import("../../src/index.js").UpstreamBinding;
   actionEndpoint?: WorkflowActionEndpoint;
   coordination?: WorkflowCoordination;
+  coordinationService?: import("../../src/lib/workflow-engine.js").WorkflowCoordinationService;
   store?: WorkflowStore;
   now?: () => number;
   claimLeaseMs?: number;
@@ -144,7 +145,7 @@ function makeEngine(opts: {
     ...(opts.actionEndpoint !== undefined
       ? { actionEndpoint: opts.actionEndpoint }
       : { adapter: opts.adapter! }),
-    coordination: opts.coordination ?? fakeCoordination(),
+    ...(opts.coordinationService ? { coordinationService: opts.coordinationService } : { coordination: opts.coordination ?? fakeCoordination() }),
     proposerDid: PROPOSER_DID,
     ...(opts.upstreamBinding ? { upstreamBinding: opts.upstreamBinding } : {}),
     buildCoordinationReplacement: async (priorPackage, verifierRequirements) => {
@@ -410,6 +411,19 @@ describe("propose", () => {
       expect(outcome.actionResponse.result).toBe("executed");
     }
     expect(adapter.calls).toHaveLength(1);
+  });
+
+  it("forwards the persisted artifact hint in the replacement workflow", async () => {
+    let submitted: unknown;
+    const service = {
+      async createApprovalWorkflow(input: any) { submitted = input; return { version:'1' as const, type:'CoordinationActionResponse' as const, actionRef:actionRef(REPLACEMENT_ACTION_ID,REPLACEMENT_HASH),state:'awaitingApprovals' as const }; },
+      async pollWork() { return {version:'1' as const,type:'CoordinationPollResponse' as const,approvalRequests:[],actionUpdates:[]}; },
+      async cancelAction() { throw new Error('unexpected cancellation'); },
+    };
+    const {engine,store} = makeEngine({adapter:fakeAdapter(response('additionalApprovalsRequired',{expectedReviewArtifact:'did:artifact:deployed'})),coordinationService:service});
+    await engine.propose(proposalInput());
+    expect(submitted).toMatchObject({expectedReviewArtifact:'did:artifact:deployed'});
+    expect(store.getWorkflow(TASK_ID)?.lastActionResponse).toMatchObject({expectedReviewArtifact:'did:artifact:deployed'});
   });
 
   it("defers on additionalApprovalsRequired and hands the action to coordination", async () => {

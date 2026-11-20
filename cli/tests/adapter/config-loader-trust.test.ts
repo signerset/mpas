@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +54,50 @@ const trustContext: TrustContext = {
 };
 
 describe("plugin trust confirmation during config loading", () => {
+  it("warns without blocking accepted configuration when history cannot be written", async () => {
+    const configDir = await makeConfigDir();
+    const acceptanceStateDir = join(configDir, "..", "state");
+    await writeFile(acceptanceStateDir, "blocked");
+    const onWarning = vi.fn();
+    const result = await loadDeploymentConfigs(configDir, {
+      confirmPluginUse: async () => true, acceptanceStateDir, recordAcceptance: true, onWarning,
+    });
+    expect(result.ok).toBe(true);
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining("Could not save plugin acceptance history"));
+  });
+
+  it("keeps inspection read-only and compares against actual acceptance in writable state", async () => {
+    const configDir = await makeConfigDir();
+    const acceptanceStateDir = join(configDir, "..", "state");
+    const options = { confirmPluginUse: async () => true, acceptanceStateDir };
+    await loadDeploymentConfigs(configDir, { ...options, recordAcceptance: true });
+    const snapshot = join(acceptanceStateDir, (await readdir(acceptanceStateDir))[0]);
+    const original = await readFile(snapshot, "utf8");
+    const path = join(configDir, "github.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    config.policy.policies = { ...config.policy.policies, newly_governed: [{ requirements: { type: "proposerOnly" } }] };
+    await writeFile(path, JSON.stringify(config));
+
+    // Status, validate and dry-run use this inspection mode. None can reset
+    // the baseline, even if their confirmation callback returns true.
+    expect((await loadDeploymentConfigs(configDir, options)).ok).toBe(true);
+    expect(await readFile(snapshot, "utf8")).toBe(original);
+    let observed: PluginTrustAssessment | undefined;
+    await chmod(configDir, 0o555);
+    try {
+      const result = await loadDeploymentConfigs(configDir, {
+        acceptanceStateDir,
+        recordAcceptance: true,
+        confirmPluginUse: async assessment => { observed = assessment; return true; },
+      });
+      expect(result.ok).toBe(true);
+      expect(observed?.governance).toMatchObject({ previousKnown: true, added: ["newly_governed"], removed: [] });
+      expect(await readFile(snapshot, "utf8")).not.toBe(original);
+      expect(await readdir(configDir)).toEqual(["github.json"]);
+    } finally {
+      await chmod(configDir, 0o755);
+    }
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -69,7 +113,7 @@ describe("plugin trust confirmation during config loading", () => {
       },
     });
 
-    expect(observed).toEqual({
+    expect(observed).toMatchObject({
       status: "notChecked",
       reason: "unavailable",
       detail: "Artifact trust lookup was not requested by this caller.",
@@ -124,7 +168,7 @@ describe("plugin trust confirmation during config loading", () => {
 
     expect(result.ok).toBe(true);
     expect(mockBuildTrustReport).toHaveBeenCalledOnce();
-    expect(observed).toEqual({ status: "checked", report });
+    expect(observed).toMatchObject({ status: "checked", report });
     expect(
       observed?.status === "checked" &&
       observed.report.verdict.warningRequired,
@@ -184,7 +228,7 @@ describe("plugin trust confirmation during config loading", () => {
       },
     });
 
-    expect(observed).toEqual({ status: "checked", report });
+    expect(observed).toMatchObject({ status: "checked", report });
     expect(result).toMatchObject({
       ok: false,
       error: { code: "PLUGIN_TRUST_REJECTED" },
@@ -211,7 +255,7 @@ describe("plugin trust confirmation during config loading", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(observed).toEqual({
+    expect(observed).toMatchObject({
       status: "notChecked",
       reason: "unavailable",
       detail: "Artifact trust API returned 502",

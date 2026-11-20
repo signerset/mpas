@@ -203,7 +203,7 @@ describe("§6.5 rule 1 — only Approvals binding to the computed Action Envelop
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.code).toBe("APPROVAL_HASH_MISMATCH");
+    expect(result.error.code).toBe("MALFORMED_APPROVAL_BUNDLE");
   });
 });
 

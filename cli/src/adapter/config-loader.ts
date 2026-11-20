@@ -1,5 +1,6 @@
+import { createHash, randomUUID } from "node:crypto";
 import { samePublicKey, validatePublicJwk } from "@oma3/mpas";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, mkdir, writeFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { canonicalize } from "json-canonicalize";
@@ -132,6 +133,11 @@ export type LoadDeploymentConfigsResult =
 export interface LoadDeploymentConfigsOptions {
   trustContext?: TrustContext | null;
   confirmPluginUse?: ConfirmPluginUse;
+  /** Writable runtime state, separate from deployment configuration. */
+  acceptanceStateDir?: string;
+  /** Only adapter startup records acceptance. Inspection remains read-only. */
+  recordAcceptance?: boolean;
+  onWarning?: (message: string) => void;
 }
 
 const policyEntrySchema = {
@@ -478,6 +484,29 @@ async function loadDeploymentConfigFile(
     };
   }
 
+  const snapshotDir = options.acceptanceStateDir;
+  const snapshotKey = createHash("sha256").update(resolve(filePath)).digest("hex");
+  const snapshotPath = snapshotDir ? join(snapshotDir, `${snapshotKey}.json`) : undefined;
+  const governed = [...new Set([
+    ...Object.entries(pluginResult.plugin.operations).filter(([, operation]) => operation.governedByDefault !== false).map(([name]) => name),
+    ...Object.keys(config.policy.policies ?? {}),
+  ])].sort();
+  let previous: string[] | undefined;
+  if (snapshotPath) {
+    try {
+      const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
+      if (snapshot.applicationDid === config.target.applicationDid && Array.isArray(snapshot.governed) &&
+          snapshot.governed.every((value: unknown) => typeof value === "string")) {
+        previous = snapshot.governed;
+      }
+    } catch { /* Unavailable history is shown explicitly in the acceptance prompt. */ }
+  }
+  assessment.governance = {
+    governed,
+    previousKnown: previous !== undefined,
+    added: governed.filter(name => !previous?.includes(name)),
+    removed: (previous ?? []).filter(name => !governed.includes(name)),
+  };
   const confirmed =
     await (options.confirmPluginUse ?? promptPluginUse)(assessment, config);
   if (!confirmed) {
@@ -486,6 +515,24 @@ async function loadDeploymentConfigFile(
       "Operator declined to use the plugin after reviewing its trust information.",
       filePath,
     );
+  }
+
+  if (options.recordAcceptance && snapshotDir && snapshotPath) {
+    const temporary = `${snapshotPath}.${randomUUID()}.tmp`;
+    try {
+      await mkdir(snapshotDir, { recursive: true });
+      await writeFile(temporary, JSON.stringify({
+        applicationDid: config.target.applicationDid,
+        artifactDid: config.plugin.artifactDid,
+        governed,
+      }), { mode: 0o600 });
+      await rename(temporary, snapshotPath);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => {});
+      (options.onWarning ?? console.warn)(
+        `Could not save plugin acceptance history at ${snapshotPath}; the next startup may show an older or unavailable comparison. ${String(error)}`,
+      );
+    }
   }
 
   return {

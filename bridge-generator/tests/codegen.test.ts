@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { generateBridge, generateToolsJson, generateWorkflowStore } from "../src/bridge-codegen.js";
-import { generatePlugin, inferImpact } from "../src/plugin-codegen.js";
+import { generatePlugin, inferImpact, mergeGeneratedDisplay } from "../src/plugin-codegen.js";
 import type { UpstreamInfo } from "../src/types.js";
 
 const upstream: UpstreamInfo = {
@@ -140,21 +140,68 @@ describe("generateBridge", () => {
 describe("generatePlugin", () => {
   it("emits an operation for every tool with fail-closed payload schemas", () => {
     const plugin = JSON.parse(generatePlugin(upstream.tools, upstream.protocolVersion)) as {
+      version: string;
       type: string;
       pluginVersion: string;
       executionProfile: { protocolVersion: string };
-      operations: Record<string, { impact: string; executionPayloadSchema: Record<string, unknown> }>;
+      operations: Record<string, { impact: string; display: { title: string; fields: unknown[] }; executionPayloadSchema: Record<string, unknown> }>;
     };
 
     expect(plugin.type).toBe("MpasApplicationPlugin");
+    expect(plugin.version).toBe("2");
     expect(plugin.pluginVersion).toBe("0.1.0");
     expect(plugin.executionProfile.protocolVersion).toBe("2024-11-05");
     expect(Object.keys(plugin.operations)).toEqual(["delete_branch", "list_repositories"]);
     expect(plugin.operations.delete_branch.impact).toBe("critical");
+    expect(plugin.operations.delete_branch.display).toEqual({
+      title: "Delete Branch",
+      fields: [{ path: "/arguments/branch", title: "branch" }],
+    });
+    expect(plugin.operations.list_repositories.display).toEqual({
+      title: "List repositories",
+      fields: [],
+    });
     expect(plugin.operations.delete_branch.executionPayloadSchema).toMatchObject({
       type: "object",
       required: ["name", "arguments"],
       additionalProperties: false,
+    });
+  });
+
+  it("keeps publisher explanations and restores a removed parameter slot", () => {
+    const fresh = JSON.parse(generatePlugin([
+      {
+        name: "merge_pull_request",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pullNumber: { type: "integer", title: "Pull request" },
+            mergeMethod: { type: "string", enum: ["merge", "squash"] },
+          },
+        },
+      },
+    ], "2024-11-05")).operations.merge_pull_request.display;
+    const previous = {
+      title: "Merge pull request",
+      description: "Check the proposed changes.",
+      interpolatedTitle: "Merge PR {/arguments/pullNumber}",
+      fields: [
+        { path: "/arguments/mergeMethod", title: "Merge method", format: "enum" as const, params: { values: [{ value: "squash", title: "Squash", description: "Combine the commits." }] } },
+      ],
+      links: [{ title: "View pull request", urlTemplate: "https://github.com/{owner}/{repo}/pull/{pullNumber}" }],
+    };
+    expect(mergeGeneratedDisplay(fresh, previous)).toEqual({
+      title: "Merge pull request",
+      description: "Check the proposed changes.",
+      interpolatedTitle: "Merge PR {/arguments/pullNumber}",
+      fields: [
+        { path: "/arguments/mergeMethod", title: "Merge method", format: "enum", params: { values: [
+          { value: "squash", title: "Squash", description: "Combine the commits." },
+          { value: "merge", title: "merge" },
+        ] } },
+        { path: "/arguments/pullNumber", title: "Pull request" },
+      ],
+      links: previous.links,
     });
   });
 
@@ -226,5 +273,19 @@ describe("baked surface binding", () => {
     expect(code).toContain(plugin.toolSurface.hash.value);
     expect(code).toContain(pin);
     expect(code).toContain("upstreamBinding:");
+  });
+});
+
+
+describe("presentation regeneration edge cases", () => {
+  it("bounds recursive schemas", () => {
+    const schema = { type: "object", properties: { tree: { $ref: "#/$defs/node" } }, $defs: { node: { type: "object", properties: { child: { $ref: "#/$defs/node" } } } } };
+    const plugin = JSON.parse(generatePlugin([{ name: "tree", inputSchema: schema }], "2026-07-28"));
+    expect(plugin.operations.tree.display.fields.length).toBeGreaterThan(0);
+    expect(plugin.operations.tree.display.fields.length).toBeLessThan(10);
+  });
+  it("preserves authored parent fields that remain possible", () => {
+    const merged = mergeGeneratedDisplay({title:"Test",fields:[{path:"/args/id",title:"id"}]}, {title:"Test",fields:[{path:"/args",title:"Whole request"}]}, {type:"object",properties:{args:{type:"object",properties:{id:{type:"string"}}}}});
+    expect(merged.fields.map(field => field.path)).toEqual(["/args", "/args/id"]);
   });
 });

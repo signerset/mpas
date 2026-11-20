@@ -267,6 +267,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
 
     const verification = await verifyActionPackage(pkg, {
       trustedSigners: loadedConfig.config.signerKeys,
+      reviewArtifact: loadedConfig.config.plugin.artifactDid as Did,
       trustedApplicationDids: [loadedConfig.config.target.applicationDid],
       now: fixedNow,
       maxEnvelopeValidityMs,
@@ -274,12 +275,18 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
         trace.emit("verification_step", { actionId, step, passed, ...details });
       },
     });
+    const respond = (init: ActionResponseInit) => actionResponse(options, {
+      ...init,
+      ignoredApprovals: verification.ignoredApprovals,
+    });
+    const reject = (result: ActionResponse["result"] & ReceiptResult, code: string, message: string) =>
+      rejection(pkg, options, envelopeHash, result, code, message, verification.ignoredApprovals);
     if (verification.status !== "verified") {
       // A structurally malformed bundle is a `malformed` result (no receipt),
       // matching the structural-envelope path above.
       if (verification.code === "MALFORMED_APPROVAL_BUNDLE") {
         trace.emit("dispatch", { actionId, result: "malformed", code: verification.code });
-        return actionResponse(options, {
+        return respond({
           result: "malformed",
           actionEnvelopeHash: envelopeHash,
           error: { code: verification.code, message: verification.message },
@@ -287,7 +294,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       }
       trace.emit("dispatch", { actionId, result: "rejected", code: verification.code });
       const result: ReceiptResult = verification.code === "EXPIRED_ACTION_ENVELOPE" ? "expired" : "rejected";
-      return rejection(pkg, options, envelopeHash, result, verification.code, verification.message);
+      return reject(result, verification.code, verification.message);
     }
 
     // MCP Execution Profile §5 step 1: the payload must be exactly
@@ -296,7 +303,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     const payloadStructure = validateMcpPayloadStructure(pkg.executionPayload);
     if (!payloadStructure.ok) {
       trace.emit("verification_step", { actionId, step: "payload_structure", passed: false, code: payloadStructure.error.code });
-      return actionResponse(options, {
+      return respond({
         result: "malformed",
         actionEnvelopeHash: envelopeHash,
         error: { code: payloadStructure.error.code, message: payloadStructure.error.message },
@@ -312,7 +319,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     );
     if (!proposerGate.allowed) {
       trace.emit("verification_step", { actionId, step: "proposer_gating", passed: false, code: proposerGate.code });
-      return rejection(pkg, options, envelopeHash, "rejected", proposerGate.code, proposerGate.message);
+      return reject("rejected", proposerGate.code, proposerGate.message);
     }
     trace.emit("verification_step", { actionId, step: "proposer_gating", passed: true });
 
@@ -320,11 +327,17 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     const opName = operationName(pkg);
     const inPolicy = opName !== undefined && Object.hasOwn(loadedConfig.config.policy.policies ?? {}, opName);
     const inPlugin = payloadValidation.ok;
-    const isGovernedOperation = inPlugin || payloadValidation.error.code !== "UNKNOWN_OPERATION" || inPolicy;
+    // A payload that fails a described operation's schema is rejected below
+    // whether or not the operation is governed by default (fail closed).
+    const failsPluginSchema = !payloadValidation.ok && payloadValidation.error.code !== "UNKNOWN_OPERATION";
+    const isGovernedOperation = (inPlugin && isGovernedByDefault(loadedConfig.plugin, opName)) || failsPluginSchema || inPolicy;
 
     // --- Routing decision: governed vs. pass-through ---
-    // If the operation IS in the plugin OR has a policy entry → governance applies.
-    // If the operation is NOT in either → pass-through (skip schema + policy, just proxy credential).
+    // Governed when the plugin governs the operation by default (listed in
+    // operations without governedByDefault: false) OR it has a policy entry.
+    // Otherwise pass-through: no policy evaluation, just proxy the credential.
+    // An operation the plugin describes but does not govern by default has
+    // already passed its schema check above.
     if (isGovernedOperation) {
       // Governed path: validate schema (only if in plugin) and evaluate policy.
       if (inPlugin) {
@@ -335,13 +348,13 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
         trace.emit("verification_step", { actionId, step: "plugin_validation", passed: true, note: "operator-governed" });
       } else if (!payloadValidation.ok) {
         trace.emit("verification_step", { actionId, step: "plugin_validation", passed: false, code: payloadValidation.error.code });
-        return rejection(pkg, options, envelopeHash, "rejected", payloadValidation.error.code, payloadValidation.error.message);
+        return reject("rejected", payloadValidation.error.code, payloadValidation.error.message);
       }
 
       const policyResult = evaluatePolicy(pkg, verification.verifiedApprovals, policyFromLoadedConfig(loadedConfig));
       if (policyResult.status === "malformed") {
         trace.emit("verification_step", { actionId, step: "policy_evaluation", passed: false, code: policyResult.code });
-        return actionResponse(options, {
+        return respond({
           result: "malformed",
           actionEnvelopeHash: envelopeHash,
           error: { code: policyResult.code, message: policyResult.message },
@@ -349,16 +362,17 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       }
       if (policyResult.status === "rejected") {
         trace.emit("verification_step", { actionId, step: "policy_evaluation", passed: false, code: policyResult.code });
-        return rejection(pkg, options, envelopeHash, "rejected", policyResult.code, policyResult.message);
+        return reject("rejected", policyResult.code, policyResult.message);
       }
       if (policyResult.status === "additionalApprovalsRequired") {
         trace.emit("dispatch", { actionId, result: "additionalApprovalsRequired" });
-        return actionResponse(options, {
+        return respond({
           result: "additionalApprovalsRequired",
+          expectedReviewArtifact: loadedConfig.config.plugin.artifactDid as Did,
           actionEnvelopeHash: envelopeHash,
           authorizationRequirements: buildAuthorizationRequirements({
             actionEnvelope: pkg.actionEnvelope,
-            unsatisfiedRules: policyResult.unsatisfiedRules,
+            approvalRequirements: policyResult.approvalRequirements,
             verifierDid: options.adapterDid,
           }),
         });
@@ -372,18 +386,15 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       // defaultRequirement does NOT apply. Power users who want a closed
       // world instead set passThrough: "deny" in the deployment config.
       if (loadedConfig.plugin.toolSurface && (!opName || !loadedConfig.plugin.toolSurface.toolNames.includes(opName))) {
-        return rejection(pkg, options, envelopeHash, "rejected", "OPERATION_NOT_ATTESTED",
+        return reject("rejected", "OPERATION_NOT_ATTESTED",
           "Operation is absent from the publisher-attested tool surface.");
       }
       if (loadedConfig.config.passThrough === "deny") {
         trace.emit("verification_step", { actionId, step: "routing_decision", passed: false, path: "pass-through", operation: operationName(pkg) });
-        return rejection(
-          pkg,
-          options,
-          envelopeHash,
+        return reject(
           "rejected",
           "OPERATION_NOT_GOVERNED",
-          `Operation ${operationName(pkg)} is not present in the plugin or policy, and this deployment denies pass-through operations.`,
+          `Operation ${operationName(pkg)} is not governed by the plugin or policy, and this deployment denies pass-through operations.`,
         );
       }
       trace.emit("verification_step", { actionId, step: "routing_decision", passed: true, path: "pass-through", operation: operationName(pkg) });
@@ -400,7 +411,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       : credentialHandle ? await options.credentialProvider.getCredential(credentialHandle) : undefined;
     if (!usesManagedOAuth && !credential?.ok) {
       trace.emit("dispatch", { actionId, result: "rejected", code: credential?.error.code ?? "CREDENTIAL_NOT_FOUND" });
-      return actionResponse(options, {
+      return respond({
         result: "rejected",
         actionEnvelopeHash: envelopeHash,
         error: {
@@ -425,7 +436,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
         reason: "target_prepare_failed",
         ...(prepared.error.reason ? { oauthReason: prepared.error.reason } : {}),
       });
-      return actionResponse(options, {
+      return respond({
         result: "rejected",
         actionEnvelopeHash: envelopeHash,
         error: { code: prepared.error.code, message: prepared.error.message },
@@ -458,7 +469,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
     if (authorize.kind !== "absent") {
       await prepared.session.close();
       trace.emit("dispatch", { actionId, result: "rejected", reason: "ledger_race", code: authorize.code });
-      return rejection(pkg, options, envelopeHash, "rejected", authorize.code, authorize.message);
+      return reject("rejected", authorize.code, authorize.message);
     }
 
     const dispatchAndRecord = async (): Promise<ActionResponse> => {
@@ -486,7 +497,7 @@ export function createAdapterApiServer(options: HttpEndpointOptions): FastifyIns
       trace.emit("receipt_generated", { actionId, result: classified.result });
       trace.emit("dispatch", { actionId, result: classified.result });
 
-      const response = actionResponse(options, {
+      const response = respond({
         result: classified.result,
         actionEnvelopeHash: envelopeHash,
         executionReceipt: receipt,
@@ -599,7 +610,7 @@ export async function inspectTargetSurface(loaded: LoadedDeploymentConfig, crede
     const expected = new Set(surface?.toolNames ?? Object.keys(loaded.plugin.operations));
     const unknownTools = [...actual].filter(name => !expected.has(name)).sort();
     const missingTools = [...expected].filter(name => !actual.has(name)).sort();
-    const ungovernedTools = [...actual].filter(name => !Object.hasOwn(loaded.plugin.operations, name) &&
+    const ungovernedTools = [...actual].filter(name => !isGovernedByDefault(loaded.plugin, name) &&
       !Object.hasOwn(loaded.config.policy.policies ?? {}, name)).sort();
     // A full-surface hash is comparable only when the name sets are equal.
     // A strict subset may be credential-filtered; it cannot prove schema equality
@@ -679,6 +690,8 @@ export function policyFromLoadedConfig(loadedConfig: LoadedDeploymentConfig): Po
 }
 
 interface ActionResponseInit {
+  ignoredApprovals?: ActionResponse["ignoredApprovals"];
+  expectedReviewArtifact?: Did;
   result: ActionResponse["result"];
   actionEnvelopeHash?: Hash;
   executionReceipt?: ExecutionReceipt;
@@ -698,6 +711,8 @@ function actionResponse(
     verifier: { did: options.adapterDid },
     ...(init.actionEnvelopeHash ? { actionEnvelopeHash: init.actionEnvelopeHash } : {}),
     result: init.result,
+    ...(init.ignoredApprovals?.length ? { ignoredApprovals: init.ignoredApprovals } : {}),
+    ...(init.expectedReviewArtifact ? { expectedReviewArtifact: init.expectedReviewArtifact } : {}),
     ...(init.authorizationRequirements ? { authorizationRequirements: init.authorizationRequirements } : {}),
     ...(init.executionReceipt ? { executionReceipt: init.executionReceipt } : {}),
     ...(init.executionResult !== undefined ? { executionResult: init.executionResult } : {}),
@@ -792,14 +807,16 @@ function diagnosticMessage(code: string): string {
 /** Deterministic rejection that issues a repeatable (stateless) Execution Receipt. */
 async function rejection(
   pkg: ActionPackage,
-  options: HttpEndpointOptions,
+  options: Pick<HttpEndpointOptions, "adapterDid" | "adapterSigner" | "adapterSigningKey">,
   envelopeHash: Hash,
   result: ActionResponse["result"] & ReceiptResult,
   code: string,
   message: string,
+  ignoredApprovals?: ActionResponse["ignoredApprovals"],
 ) {
   return actionResponse(options, {
     result,
+    ignoredApprovals,
     actionEnvelopeHash: envelopeHash,
     executionReceipt: await receiptFor(pkg, options, result),
     error: { code, message },
@@ -886,6 +903,17 @@ async function receiptFor(
     signer: options.adapterSigner,
     signingKey: options.adapterSigningKey,
   });
+}
+
+/**
+ * Whether the plugin governs an operation by default. Plugin schema version 2
+ * lets a publisher describe an operation (schema and display) with
+ * `governedByDefault: false`, so operators who choose to govern it get
+ * validation and reviewer explanations. Absent means governed.
+ */
+function isGovernedByDefault(plugin: LoadedDeploymentConfig["plugin"], name: string | undefined): boolean {
+  if (name === undefined || !Object.hasOwn(plugin.operations, name)) return false;
+  return (plugin.operations[name] as { governedByDefault?: unknown }).governedByDefault !== false;
 }
 
 function operationName(actionPackage: ActionPackage): string {

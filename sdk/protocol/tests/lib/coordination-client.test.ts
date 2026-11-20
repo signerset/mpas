@@ -89,6 +89,7 @@ describe("Coordination Service clients", () => {
       });
 
       await expect(client.createApprovalWorkflow({
+        expectedReviewArtifact: "did:artifact:deployed",
         actionPackage,
         authorizationRequirements,
       })).resolves.toMatchObject({
@@ -107,6 +108,7 @@ describe("Coordination Service clients", () => {
         client.cancelAction({ actionId: actionPackage.actionEnvelope.actionId }),
       ).resolves.toMatchObject({ state: "cancelled" });
 
+      expect(requests[0]?.body).toMatchObject({ expectedReviewArtifact: "did:artifact:deployed" });
       expect(requests.map((request) => request.url)).toEqual([
         "/mpas/v1/coordination/workflow",
         "/mpas/v1/coordination/poll",

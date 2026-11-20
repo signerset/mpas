@@ -1,6 +1,6 @@
 # Approvals Update — Feature Record
 
-**Status:** Partially implemented. The Verifier already evaluates nested policies, and the SDK advertises "all of" and "any of" correctly, not yet released. Approval filtering, complete requirements, requirement groups, and limits are specified but not implemented. §5 lists each item.
+**Status:** Implemented in the MPAS working tree, not released. The separate coordination-server and maintainer-app repos remain deferred. Legacy builder inputs containing only unmet requirements remain deprecated; producers use the complete `approvalRequirements` returned by policy evaluation.
 
 **Created:** 2026-11-18
 
@@ -71,18 +71,18 @@ Out of scope: a Signer in two groups can count toward both thresholds, flat or n
 
 | Item | Normative source | Status |
 |---|---|---|
-| Ignore an Approval that fails verification instead of failing the bundle, within the §3 bounds | Core §5.5.7, §5.6.4, §6.2.2 | **Not implemented**. `verifyApprovalBundle` in the SDK fails the whole bundle |
-| `ignoredApprovals` in every response where an Approval was ignored | Core §6.2.3; HTTP §6.4, §6.4.3 | **Not implemented** in the SDK types or the Credential Adapter |
-| `REVIEW_ARTIFACT_MISMATCH` entries | Application Plugin Profile §13.2 | **Not implemented**; see the [plugin maintainer feature record](../plugin-maintainer/spec.md) §3 |
+| Ignore an Approval that fails verification instead of failing the bundle, within the §3 bounds | Core §5.5.7, §5.6.4, §6.2.2 | Implemented in SDK verification; proposer and structural failures remain fatal. |
+| `ignoredApprovals` in every response where an Approval was ignored | Core §6.2.3; HTTP §6.4, §6.4.3 | Implemented in SDK types and Credential Adapter responses, including execution. |
+| `REVIEW_ARTIFACT_MISMATCH` entries | Application Plugin Profile §13.2 | Implemented against the loaded deployment artifact. |
 | Verifier evaluation of nested policies | JSON Verifier Policy Profile §5.5 | Implemented: the policy engine evaluates `allOf` and `anyOf` trees |
-| `proposerOnly` simplification when building requirements | Policy Profile §7.7 | Implemented for the unmet-only computation, which treats `proposerOnly` as satisfied. Must be kept when building complete requirements |
-| Advertising "all of" as `allOf` and every "any of" option | Core §5.8.5; Policy Profile §7.7 | Implemented in the SDK (`ed7e024`), not released. The CLI needs an SDK release and dependency bump, plus one line in `adapter-api-server.ts` to pass the structured requirement |
-| Complete requirements instead of the unmet part | Core §5.8.1; Policy Profile §7.7 | **Not implemented**. The SDK still omits thresholds already met; its test that a satisfied entry is dropped must be reversed |
-| Requirement groups in the SDK types, builder, and structural validator | Core §5.8.5, Appendix A | **Not implemented**. `ApprovalRequirements` in the SDK types and `approval-requirements-schema.ts` accept thresholds only |
-| Limits in the policy loader and in every reader | Core §5.8.5; Policy Profile §5.5.5 | **Not implemented**. Neither the policy engine nor the readers bound nesting today |
-| Shared SDK reader for readiness, recursive achievability, and eligible Signers | Core §5.8.5 | **Not implemented**. `evaluateApprovalRequirements` handles flat lists only; its override behavior is kept |
-| Coordination Service: groups, limits, override Signers as eligible signers, composite `progress` | HTTP Profile §8.4–§8.6 | **Not implemented** in `mpas-coordination-server`. It uses the SDK's `evaluateApprovalRequirements` for readiness, but its own Signer selection and validation read only the top-level threshold lists, and `progressFor` reports the first unmet threshold's counts |
-| Proposer bridge Task metadata | MCP Proposer Bridge Client Profile §5 | **Not implemented**; follows the SDK types |
+| `proposerOnly` simplification when building requirements | Policy Profile §7.7 | Implemented when mapping the complete combined policy. |
+| Advertising "all of" as `allOf` and every "any of" option | Core §5.8.5; Policy Profile §7.7 | Implemented; the CLI supplies the complete requirement object. |
+| Complete requirements instead of the unmet part | Core §5.8.1; Policy Profile §7.7 | Implemented, with regression checks retaining already-satisfied branches. |
+| Requirement groups in the SDK types, builder, and structural validator | Core §5.8.5, Appendix A | Implemented in SDK types, builder, and bounded structural parser. |
+| Limits in the policy loader and in every reader | Core §5.8.5; Policy Profile §5.5.5 | Implemented in policy loading and shared MPAS requirement readers; other repositories still need the upgraded SDK. |
+| Shared SDK reader for readiness, recursive achievability, and eligible Signers | Core §5.8.5 | Implemented by `readApprovalRequirements`, including eligible signers, readiness, and progress. |
+| Coordination Service: groups, limits, override Signers as eligible signers, composite `progress` | HTTP Profile §8.4–§8.6 | Implemented in the MPAS local service. The separate `mpas-coordination-server` repo remains deferred. |
+| Proposer bridge Task metadata | MCP Proposer Bridge Client Profile §5 | Implemented through shared parsing and SDK types. |
 | iOS maintainer app | Core §5.8.5 | **Not implemented**. `ApprovalRequirements` in `MPASCore/WireModels.swift` accepts flat lists only and rejects other keys |
 
 ## 6. Rollout
@@ -104,7 +104,7 @@ Revisit this only if usage shows that restarting approval collection is a signif
 
 ## 8. Conformance scenarios
 
-Shared fixtures should cover these scenarios. They are specified behavior; §5 says what is implemented.
+These are the intended shared conformance scenarios. Current coverage is in SDK and CLI unit/integration tests, not a shared language-neutral fixture set. §5 describes the implementation status.
 
 **Filtering**
 

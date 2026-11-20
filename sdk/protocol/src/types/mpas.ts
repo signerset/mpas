@@ -75,6 +75,7 @@ export interface Approval {
 }
 
 export interface CanonicalApprovalPayload {
+  reviewArtifact?: Did;
   type: "ApprovalPayload";
   actionEnvelopeHash: HashObject;
   decision: Decision;
@@ -122,9 +123,15 @@ export interface OverrideSigner {
   description?: string;
 }
 
+export type RequirementItem = ThresholdRequirement | RequirementGroup;
+export interface RequirementGroup {
+  type: "anyOf" | "allOf";
+  requirements: RequirementItem[];
+  description?: string;
+}
 export interface ApprovalRequirements {
-  anyOf?: ThresholdRequirement[];
-  allOf?: ThresholdRequirement[];
+  anyOf?: RequirementItem[];
+  allOf?: RequirementItem[];
   overrideSigners?: OverrideSigner[];
 }
 
@@ -218,6 +225,8 @@ export interface CoordinationActionResponse {
 
 /** Workflow-creation request; the historical version 1 discriminant is retained. */
 export interface CoordinationActionRequest {
+  /** Unsigned advisory artifact identity, never a trust decision. */
+  expectedReviewArtifact?: Did;
   version: MpasVersion;
   type: "CoordinationActionRequest";
   actionPackage: ActionPackage;
@@ -270,6 +279,8 @@ export interface SignerReviewSet {
 }
 
 export interface ApprovalRequest {
+  /** Unsigned advisory artifact identity, never a trust decision. */
+  expectedReviewArtifact?: Did;
   version: MpasVersion;
   type: "ApprovalRequest";
   actionRef: ActionReference;
@@ -278,8 +289,8 @@ export interface ApprovalRequest {
 }
 
 export interface CoordinationProgress {
-  required: number;
-  collected: number;
+  required?: number;
+  collected?: number;
   pending: Did[];
 }
 
@@ -450,9 +461,44 @@ export interface PolicySuggestion {
   suggestedRequirement?: JsonSchema;
 }
 
+/** Application-plugin document schema. Independent of the MPAS message `version`. */
+export type PluginSchemaVersion = "1" | "2";
+
+export interface DisplayEnumValue {
+  value: string | number | boolean | null;
+  title: string;
+  description?: string;
+}
+
+export interface DisplayField {
+  path: string;
+  title?: string;
+  description?: string;
+  format?: "raw" | "enum" | "date";
+  params?: {
+    values?: DisplayEnumValue[];
+    type?: "date" | "date-time";
+  };
+}
+
+export interface DisplayLink {
+  title: string;
+  description?: string;
+  urlTemplate: string;
+  variables?: Record<string, string>;
+}
+
+export interface OperationDisplay {
+  title: string;
+  description?: string;
+  interpolatedTitle?: string;
+  fields: DisplayField[];
+  links?: DisplayLink[];
+}
+
 export interface MpasApplicationPlugin {
   toolSurface?: { hash: HashObject; toolNames: string[] };
-  version: MpasVersion;
+  version: PluginSchemaVersion;
   type: "MpasApplicationPlugin";
   pluginDid: Did;
   pluginVersion: string;
@@ -472,6 +518,14 @@ export interface PluginOperationDescriptor {
   description?: string;
   impact?: string;
   executionPayloadSchema: JsonSchema;
+  /**
+   * Plugin schema version 2 only. `false` marks an operation the publisher
+   * describes but does not govern by default; operator policy may still govern
+   * it. Absent or `true` means governed by default.
+   */
+  governedByDefault?: boolean;
+  /** Present only on plugin schema version 2. */
+  display?: OperationDisplay;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +579,20 @@ export interface ActionRequest {
  * returns this for any submission it can parse far enough to compute the
  * actionEnvelopeHash. `result` is the projection of the Core Action Lifecycle.
  */
+export interface IgnoredApproval {
+  /** Zero-based position in the submitted bundle. */
+  index: number;
+  signerDid?: Did;
+  code: string;
+  message?: string;
+  /** Expected artifact, only for REVIEW_ARTIFACT_MISMATCH. */
+  reviewArtifact?: Did;
+}
+
 export interface ActionResponse {
+  ignoredApprovals?: IgnoredApproval[];
+  /** Unsigned advisory artifact identity, never a trust decision. */
+  expectedReviewArtifact?: Did;
   version: "1";
   type: "ActionResponse";
   verifier?: { did: Did };

@@ -1,3 +1,4 @@
+import { readApprovalRequirements } from "@oma3/mpas";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -557,12 +558,9 @@ function waitForRelayedResponse<T>(response: Promise<T>, timeoutMs: number): Pro
 }
 
 function coordinationRecipients(body: CoordinationActionRequest): Did[] {
-  const requirements = body.authorizationRequirements.approvalRequirements;
-  return [...new Set<Did>([
+  return [...new Set([
     body.actionPackage.actionEnvelope.proposer.did,
-    ...(requirements.anyOf ?? []).flatMap((threshold) => threshold.eligibleSigners),
-    ...(requirements.allOf ?? []).flatMap((threshold) => threshold.eligibleSigners),
-    ...(requirements.overrideSigners ?? []).map((entry) => entry.signer),
+    ...readApprovalRequirements(body.authorizationRequirements.approvalRequirements).eligibleSigners,
   ])];
 }
 

@@ -1,12 +1,13 @@
+import { canonicalize } from "json-canonicalize";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { compactVerify, importJWK, type JWK } from "jose";
+import { CompactSign, compactVerify, importJWK, type JWK } from "jose";
 import { buildDeliveryEnvelope, computeToolSurfaceHash, type ActionPackage } from "@oma3/mpas";
-import { loadDeploymentConfigs, type LoadedDeploymentConfig } from "../../src/adapter/config-loader.js";
+import { computeArtifactDid, loadDeploymentConfigs, type LoadedDeploymentConfig } from "../../src/adapter/config-loader.js";
 import { FileCredentialProvider } from "../../src/adapter/credential-provider.js";
 import {
   buildIndeterminateRecoveryResponse,
@@ -194,6 +195,41 @@ describe("HTTP endpoint", () => {
     });
   });
 
+
+  it.each([false, true])("reports a mismatched extra review; threshold shortfall=%s", async (shortfall) => {
+    const app = await makeApp();
+    const actionPackage = await readJson<ActionPackage>(join(fixturesDir, "core", "valid-two-approvals.json"));
+    const original = actionPackage.approvalBundle.approvals[1]!;
+    const payload = JSON.parse(Buffer.from(original.signature.value.split('.')[1]!, 'base64url').toString());
+    const key = await readJson<KeyFixture>(join(fixturesDir, "test-keys", "maintainer-a.json"));
+    expect(payload.signerDid).toBe(key.did);
+    payload.reviewArtifact = 'did:artifact:old';
+    const header = JSON.parse(Buffer.from(original.signature.value.split('.')[0]!, 'base64url').toString());
+    const changed = { ...original, signature: { format: 'jws' as const, value: await new CompactSign(Buffer.from(canonicalize(payload))).setProtectedHeader(header).sign(await importJWK(key.privateJwk, header.alg)) } };
+    if (shortfall) actionPackage.approvalBundle.approvals[1] = changed;
+    else actionPackage.approvalBundle.approvals.push(changed);
+    const response = await app.inject({method:'POST',url:'/mpas/v1/action',headers:{'content-type':'application/mpas+json'},payload:JSON.stringify({version:'1',type:'ActionRequest',actionPackage})});
+    expect(response.json()).toMatchObject({ result: shortfall ? 'additionalApprovalsRequired' : 'executed', ignoredApprovals:[{index:shortfall?1:3,code:'REVIEW_ARTIFACT_MISMATCH',reviewArtifact:expect.stringMatching(/^did:artifact:/)}] });
+    if(shortfall) {
+      expect(response.json().expectedReviewArtifact).toBe(response.json().ignoredApprovals[0].reviewArtifact);
+      expect(response.json().authorizationRequirements.approvalRequirements.anyOf[0].threshold).toBe(2);
+    }
+  });
+
+  it("loads an actual version 2 plugin through deployment configuration", async () => {
+    const dir = await makeAutoApproveConfigDir();
+    const configPath = join(dir,'github-auto-approve.json');
+    const config = await readJson<any>(configPath);
+    const plugin = await readJson<any>(config.plugin.path);
+    plugin.version = '2';
+    for (const operation of Object.values(plugin.operations) as any[]) operation.display = { title:'Review',fields:[{path:''}] };
+    config.plugin.path = join(dir,'plugin-v2.data');
+    config.plugin.artifactDid = await computeArtifactDid(plugin);
+    await writeFile(config.plugin.path,JSON.stringify(plugin));
+    await writeFile(configPath,JSON.stringify(config));
+    const app = await makeApp(dir);
+    expect((await submitFixture(app,'valid-no-approval-required.json')).json().result).toBe('executed');
+  });
   it("rejects an envelope whose remaining validity exceeds the configured maximum", async () => {
     const app = await makeApp(undefined, undefined, undefined, {
       maxEnvelopeValidityMs: 60 * 60 * 1000,
@@ -547,6 +583,73 @@ describe("HTTP endpoint", () => {
     expect(response.json()).toMatchObject({
       result: "rejected",
       error: { code: "OPERATION_NOT_GOVERNED" },
+    });
+  });
+
+  describe("operations the plugin describes but does not govern by default", () => {
+    const issueSchema = {
+      type: "object",
+      properties: {
+        name: { const: "create_issue_mirror" },
+        arguments: {
+          type: "object",
+          properties: {
+            owner: { type: "string" },
+            repo: { type: "string" },
+            title: { type: "string" },
+            body: { type: "string" },
+          },
+        },
+      },
+      required: ["name", "arguments"],
+    };
+
+    // passThrough: "deny" makes the routing class observable: a pass-through
+    // operation is rejected with OPERATION_NOT_GOVERNED, a governed one is not.
+    async function appWith(governedByDefault: boolean | undefined, schema: Record<string, unknown> = issueSchema) {
+      const dir = await makeAutoApproveConfigDir();
+      const path = join(dir, "github-auto-approve.json");
+      const config = await readJson<Record<string, unknown>>(path);
+      config.passThrough = "deny";
+      await writeFile(path, `${JSON.stringify(config, null, 2)}\n`);
+      const hash = computeToolSurfaceHash([{ name: "create_issue_mirror", inputSchema: { type: "object" } }]);
+      const app = await makeApp(dir, undefined, (entry) => {
+        entry.plugin.toolSurface = { hash, toolNames: ["create_issue_mirror"] };
+        (entry.plugin.operations as Record<string, unknown>).create_issue_mirror = {
+          executionPayloadSchema: schema,
+          ...(governedByDefault === undefined ? {} : { governedByDefault }),
+        };
+      });
+      const actionPackage = await readJson<ActionPackage>(join(fixturesDir, "core", "valid-no-approval-required.json"));
+      return app.inject({
+        method: "POST",
+        url: "/mpas/v1/action",
+        headers: { "content-type": "application/mpas+json" },
+        payload: JSON.stringify({
+          version: "1", type: "ActionRequest", actionPackage, upstreamBinding: { toolSurface: hash },
+        }),
+      });
+    }
+
+    it("routes it as pass-through", async () => {
+      const response = await appWith(false);
+      expect(response.json()).toMatchObject({ result: "rejected", error: { code: "OPERATION_NOT_GOVERNED" } });
+    });
+
+    it("governs it when governedByDefault is absent", async () => {
+      const response = await appWith(undefined);
+      expect(response.json().error?.code).not.toBe("OPERATION_NOT_GOVERNED");
+    });
+
+    it("still rejects a payload that fails its schema", async () => {
+      // The fixture payload carries a body; a schema without one fails closed.
+      const { body: _body, ...withoutBody } = issueSchema.properties.arguments.properties;
+      const strict = {
+        ...issueSchema,
+        properties: { ...issueSchema.properties, arguments: { type: "object", properties: withoutBody } },
+      };
+      const response = await appWith(false, strict);
+      expect(response.json()).toMatchObject({ result: "rejected", error: { code: "PAYLOAD_SCHEMA_INVALID" } });
     });
   });
 

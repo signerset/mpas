@@ -124,7 +124,7 @@ describe("strict signed Approval payload parsing", () => {
         [{ did: keyManager.did }],
       );
 
-      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ ok: true, verifiedApprovals: { approvals: [] }, ignoredApprovals: [{ index: 0 }] });
     });
 
     it("still verifies the same signed payload without duplicate members", async () => {
@@ -145,7 +145,7 @@ describe("strict signed Approval payload parsing", () => {
         [{ did: keyManager.did }],
       );
 
-      expect(result).toMatchObject({ ok: false, error: { code: "NON_CANONICAL_APPROVAL_PAYLOAD" } });
+      expect(result).toMatchObject({ ok: true, verifiedApprovals: { approvals: [] }, ignoredApprovals: [{ code: "APPROVAL_PAYLOAD_MISMATCH" }] });
     });
 
     it.each([
@@ -158,7 +158,7 @@ describe("strict signed Approval payload parsing", () => {
         [{ did: keyManager.did }],
       );
 
-      expect(result).toMatchObject({ ok: false, error: { code: "INVALID_SIGNATURE" } });
+      expect(result).toMatchObject({ ok: true, verifiedApprovals: { approvals: [] }, ignoredApprovals: [{ code: "INVALID_SIGNATURE" }] });
     });
 
     it.each([
@@ -171,7 +171,7 @@ describe("strict signed Approval payload parsing", () => {
         [{ did: keyManager.did }],
       );
 
-      expect(result).toMatchObject({ ok: false, error: { code: "APPROVAL_PAYLOAD_MISMATCH" } });
+      expect(result).toMatchObject({ ok: true, verifiedApprovals: { approvals: [] }, ignoredApprovals: [{ code: "APPROVAL_PAYLOAD_MISMATCH" }] });
     });
 
     it.each([
@@ -270,7 +270,7 @@ describe("strict signed Approval payload parsing", () => {
         { actionEnvelope: actionPackage.actionEnvelope, now: Date.parse("2026-06-05T18:30:00.000Z") },
       );
 
-      expect(result).toMatchObject({ ok: false, error: { code: "APPROVAL_TIME_INVALID" } });
+      expect(result).toMatchObject({ ok: true, verifiedApprovals: { approvals: [] }, ignoredApprovals: [{ code: "APPROVAL_TIME_INVALID" }] });
     });
   });
 

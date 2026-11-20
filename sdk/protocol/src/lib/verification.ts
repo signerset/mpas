@@ -4,7 +4,7 @@ import { verifySuiteCompactJws } from "./signature-suites.js";
 import { verificationKid } from "./signer.js";
 import { deriveDidJwk, didJwkToJwk, didJwkToKid, isDidJwk } from "./did-jwk.js";
 import type { ActionEnvelope, ActionId, ActionPackage, Approval, CanonicalApprovalPayload, Did } from "../types/mpas.js";
-import type { ExecutionPayload, Hash, ExecutionReceipt } from "../types/mpas.js";
+import type { ExecutionPayload, Hash, ExecutionReceipt, IgnoredApproval } from "../types/mpas.js";
 import type { VerificationTraceCallback } from "./trace.js";
 import { computeJsonHash } from "../utils/hash.js";
 import { strictJsonParse } from "../utils/strict-json.js";
@@ -86,7 +86,8 @@ export interface ApprovalBundleError {
     | "INVALID_SIGNATURE"
     | "APPROVAL_PAYLOAD_MISMATCH"
     | "NON_CANONICAL_APPROVAL_PAYLOAD"
-    | "APPROVAL_TIME_INVALID";
+    | "APPROVAL_TIME_INVALID"
+    | "REVIEW_ARTIFACT_MISMATCH";
   message: string;
   path: string;
 }
@@ -95,10 +96,12 @@ export type ApprovalBundleVerificationResult =
   | {
       ok: true;
       verifiedApprovals: VerifiedApprovals;
+      ignoredApprovals: IgnoredApproval[];
     }
   | {
       ok: false;
       error: ApprovalBundleError;
+      ignoredApprovals?: IgnoredApproval[];
     };
 
 export interface TrustedExecutionProfile {
@@ -118,6 +121,8 @@ export interface TrustedApplicationProfile {
 }
 
 export interface ApprovalTimeOptions {
+  /** Loaded deployment artifact. Omitted or null means the verifier uses no metadata. */
+  reviewArtifact?: Did | null;
   actionEnvelope?: ActionEnvelope;
   now?: number;
   timestampToleranceMs?: number;
@@ -132,6 +137,8 @@ export const MCP_TOOL_CALL_EXECUTION_PROFILE: TrustedExecutionProfile = {
 };
 
 export interface VerificationConfig {
+  /** Actual loaded metadata identity; absent means no metadata. */
+  reviewArtifact?: Did;
   trustedSigners: TrustedSigner[];
   /** Exact trusted Application/profile/format bindings. */
   trustedApplicationProfiles?: TrustedApplicationProfile[];
@@ -168,9 +175,11 @@ export type VerificationResult =
       applicationDid: Did;
       operationName?: string;
       verifiedApprovals: VerifiedApprovals;
+      ignoredApprovals: IgnoredApproval[];
     }
   | {
       status: "rejected";
+      ignoredApprovals?: IgnoredApproval[];
       code: VerificationFailureCode;
       message: string;
       path: string;
@@ -509,77 +518,94 @@ export async function verifyApprovalBundle(
   const trustedByDid = new Map(trustedSigners.map((signer) => [signer.did, signer]));
   const approvals: VerifiedApproval[] = [];
 
+  const ignoredApprovals: IgnoredApproval[] = [];
+  // Envelope mismatches are structural, regardless of which signature fails first.
+  if (bundle.approvals.some(approval => !hashesEqual(approval.actionEnvelopeHash, actionEnvelopeHash))) {
+    return approvalBundleError("MALFORMED_APPROVAL_BUNDLE", "An Approval binds to a different Action Envelope.", "$.approvalBundle.approvals");
+  }
   for (const [index, approval] of bundle.approvals.entries()) {
     const path = `$.approvalBundle.approvals[${index}]`;
+    const verifyOne = async () => {
+      const decoded = decodeApprovalJws(approval);
+      if (!decoded.ok) {
+        return approvalBundleError(decoded.code, decoded.message, `${path}.signature.value`);
+      }
 
-    if (!hashesEqual(approval.actionEnvelopeHash, actionEnvelopeHash)) {
-      return approvalBundleError(
-        "APPROVAL_HASH_MISMATCH",
-        "Approval actionEnvelopeHash does not match the Action Envelope hash.",
-        `${path}.actionEnvelopeHash`,
-      );
+      const untrustedPayload = decoded.payload;
+      if (!untrustedPayload.signerDid) {
+        return approvalBundleError("UNTRUSTED_SIGNER", "Approval payload does not identify a trusted signer.", path);
+      }
+
+      const trustedSigner = trustedByDid.get(untrustedPayload.signerDid);
+      if (!trustedSigner) {
+        return approvalBundleError("UNTRUSTED_SIGNER", "Approval signer is not trusted.", `${path}.signature`);
+      }
+
+      const signerJwk = resolveTrustedSignerJwk(trustedSigner);
+      if (!signerJwk) {
+        return approvalBundleError(
+          "UNTRUSTED_SIGNER",
+          "No verification key could be resolved for the trusted signer.",
+          `${path}.signature`,
+        );
+      }
+
+      try {
+        await verifySuiteCompactJws(approval.signature.value, signerJwk, verificationKid(signerJwk, trustedSigner.did));
+      } catch {
+        return approvalBundleError("INVALID_SIGNATURE", "Approval signature could not be verified.", `${path}.signature`);
+      }
+
+      const verifiedPayload = decoded.payload;
+      if (
+        !hashesEqual(verifiedPayload.actionEnvelopeHash, approval.actionEnvelopeHash) ||
+        verifiedPayload.decision !== approval.decision ||
+        verifiedPayload.createdAt !== approval.createdAt ||
+        verifiedPayload.expiresAt !== approval.expiresAt ||
+        verifiedPayload.signerDid !== trustedSigner.did
+      ) {
+        return approvalBundleError(
+          "APPROVAL_PAYLOAD_MISMATCH",
+          "Signed Approval payload does not match the top-level Approval fields.",
+          path,
+        );
+      }
+
+      const timeError = validateApprovalTime(approval, timeOptions);
+      if (timeError) {
+        return approvalBundleError("APPROVAL_TIME_INVALID", timeError.message, `${path}.${timeError.field}`);
+      }
+
+      if (verifiedPayload.reviewArtifact !== undefined && verifiedPayload.reviewArtifact !== (timeOptions.reviewArtifact ?? null)) {
+        return approvalBundleError("REVIEW_ARTIFACT_MISMATCH", "Approval review artifact does not match the loaded metadata.", path);
+      }
+      approvals.push({
+        approval,
+        signerDid: trustedSigner.did,
+        decision: approval.decision,
+        createdAt: approval.createdAt,
+      });
+      return undefined;
+    };
+    const failure = await verifyOne();
+    if (failure && !failure.ok) {
+      const decoded = decodeApprovalJws(approval);
+      const signerDid = decoded.ok ? decoded.payload.signerDid : undefined;
+      // A claimed propose decision must never be salvaged by filtering it.
+      if (approval.decision === "propose" || (decoded.ok && decoded.payload.decision === "propose")) {
+        return { ...failure, ignoredApprovals };
+      }
+      const code = failure.error.code === "NON_CANONICAL_APPROVAL_PAYLOAD" ? "APPROVAL_PAYLOAD_MISMATCH" : failure.error.code;
+      ignoredApprovals.push({ index, ...(signerDid ? { signerDid } : {}), code,
+        message: failure.error.message,
+        ...(code === "REVIEW_ARTIFACT_MISMATCH" && timeOptions.reviewArtifact ? { reviewArtifact: timeOptions.reviewArtifact } : {}),
+      });
     }
-
-    const decoded = decodeApprovalJws(approval);
-    if (!decoded.ok) {
-      return approvalBundleError(decoded.code, decoded.message, `${path}.signature.value`);
-    }
-
-    const untrustedPayload = decoded.payload;
-    if (!untrustedPayload.signerDid) {
-      return approvalBundleError("UNTRUSTED_SIGNER", "Approval payload does not identify a trusted signer.", path);
-    }
-
-    const trustedSigner = trustedByDid.get(untrustedPayload.signerDid);
-    if (!trustedSigner) {
-      return approvalBundleError("UNTRUSTED_SIGNER", "Approval signer is not trusted.", `${path}.signature`);
-    }
-
-    const signerJwk = resolveTrustedSignerJwk(trustedSigner);
-    if (!signerJwk) {
-      return approvalBundleError(
-        "UNTRUSTED_SIGNER",
-        "No verification key could be resolved for the trusted signer.",
-        `${path}.signature`,
-      );
-    }
-
-    try {
-      await verifySuiteCompactJws(approval.signature.value, signerJwk, verificationKid(signerJwk, trustedSigner.did));
-    } catch {
-      return approvalBundleError("INVALID_SIGNATURE", "Approval signature could not be verified.", `${path}.signature`);
-    }
-
-    const verifiedPayload = decoded.payload;
-    if (
-      !hashesEqual(verifiedPayload.actionEnvelopeHash, approval.actionEnvelopeHash) ||
-      verifiedPayload.decision !== approval.decision ||
-      verifiedPayload.createdAt !== approval.createdAt ||
-      verifiedPayload.expiresAt !== approval.expiresAt ||
-      verifiedPayload.signerDid !== trustedSigner.did
-    ) {
-      return approvalBundleError(
-        "APPROVAL_PAYLOAD_MISMATCH",
-        "Signed Approval payload does not match the top-level Approval fields.",
-        path,
-      );
-    }
-
-    const timeError = validateApprovalTime(approval, timeOptions);
-    if (timeError) {
-      return approvalBundleError("APPROVAL_TIME_INVALID", timeError.message, `${path}.${timeError.field}`);
-    }
-
-    approvals.push({
-      approval,
-      signerDid: trustedSigner.did,
-      decision: approval.decision,
-      createdAt: approval.createdAt,
-    });
   }
 
   return {
     ok: true,
+    ignoredApprovals,
     verifiedApprovals: {
       actionEnvelopeHash,
       approvals,
@@ -737,13 +763,14 @@ export async function verifyActionPackage(
     actionPackage.approvalBundle,
     computeJsonHash(actionPackage.actionEnvelope),
     config.trustedSigners,
-    { actionEnvelope: actionPackage.actionEnvelope, now, timestampToleranceMs },
+    { actionEnvelope: actionPackage.actionEnvelope, now, timestampToleranceMs, reviewArtifact: config.reviewArtifact ?? null },
   );
   if (!bundleResult.ok) {
     onStep?.("approval_bundle_verification", false, { code: bundleResult.error.code, message: bundleResult.error.message });
     return {
       status: "rejected",
-      code: "APPROVAL_BUNDLE_INVALID",
+      code: ["MALFORMED_APPROVAL_BUNDLE", "ACTION_ENVELOPE_HASH_MISMATCH"].includes(bundleResult.error.code) ? "MALFORMED_APPROVAL_BUNDLE" : "APPROVAL_BUNDLE_INVALID",
+      ignoredApprovals: bundleResult.ignoredApprovals,
       message: bundleResult.error.message,
       path: bundleResult.error.path,
     };
@@ -763,6 +790,7 @@ export async function verifyActionPackage(
     return {
       status: "rejected",
       code: "MISSING_PROPOSER_APPROVAL",
+      ignoredApprovals: bundleResult.ignoredApprovals,
       message: "Approval Bundle must include a verified propose Approval from actionEnvelope.proposer.did.",
       path: "$.approvalBundle.approvals",
     };
@@ -775,6 +803,7 @@ export async function verifyActionPackage(
     applicationDid: actionPackage.actionEnvelope.target.applicationDid,
     operationName: operationNameFromPayload(actionPackage.executionPayload),
     verifiedApprovals,
+    ignoredApprovals: bundleResult.ignoredApprovals,
   };
 }
 
@@ -1028,11 +1057,12 @@ function operationNameFromPayload(payload: ExecutionPayload): string | undefined
 }
 
 function isCanonicalApprovalPayload(value: unknown): value is CanonicalApprovalPayload {
-  if (!isRecord(value) || firstUnexpectedKey(value, ["type", "actionEnvelopeHash", "decision", "signerDid", "createdAt", "expiresAt"]) !== undefined) {
+  if (!isRecord(value) || firstUnexpectedKey(value, ["type", "actionEnvelopeHash", "decision", "signerDid", "createdAt", "expiresAt", "reviewArtifact"]) !== undefined) {
     return false;
   }
 
   return (
+    (!hasOwn(value, "reviewArtifact") || isDid(value.reviewArtifact)) &&
     value.type === "ApprovalPayload" &&
     isHashObject(value.actionEnvelopeHash) &&
     isDecision(value.decision) &&

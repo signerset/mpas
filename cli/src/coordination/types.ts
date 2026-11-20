@@ -37,6 +37,7 @@ export interface SignerReviewSet {
 }
 
 export interface ApprovalRequest {
+  expectedReviewArtifact?: Did;
   version: "1";
   type: "ApprovalRequest";
   actionRef: ActionRef;
@@ -45,8 +46,8 @@ export interface ApprovalRequest {
 }
 
 export interface CoordinationProgress {
-  required: number;
-  collected: number;
+  required?: number;
+  collected?: number;
   pending: Did[];
 }
 
@@ -64,6 +65,7 @@ export interface ActionUpdate {
 
 /** Workflow-creation request using the established version 1 wire discriminant. */
 export interface CoordinationActionRequest {
+  expectedReviewArtifact?: Did;
   version: "1";
   type: "CoordinationActionRequest";
   actionPackage: ActionPackage;

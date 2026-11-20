@@ -50,12 +50,13 @@ Output:
 
 ```text
 applications/my-app/
-  plugin.json                     MpasApplicationPlugin — THE governed set; edit this (membership, DIDs, impacts)
+  plugin.json                     Application Plugin v2: validation, governance defaults, and review presentation
   registry-entry.json             Application Registry draft (PLACEHOLDERs unless --org-config given)
   harness-config.json             Input for the compat/approval harnesses
   build-artifacts/                Advisory/debug artifacts — not governance controls
     tools-list.snapshot.json      Verbatim tool surface + toolSurface hash (regen uses it to remember your removals)
-    metadata.json                 Server info, protocol version, capture timestamp
+    metadata.json                 Server info, capture timestamp, prior default governed set
+    plugin-review.txt             Changed tools/governance, stale wording, missing explanations, invalid references
     classification.json           Heuristic impact suggestions to consult while editing plugin.json
   bridge/
     src/index.ts                  The generated bridge MCP runtime
@@ -63,6 +64,8 @@ applications/my-app/
     package.json / tsconfig.json / README.md
   CHANGELOG.md                    Yours; never overwritten
 ```
+
+Regeneration preserves authored presentation text and validates the resulting plugin with the SDK. Correct any invalid references reported in `plugin-review.txt` before releasing. A failed validation keeps the previous comparison baseline so the next run still reports changes that need review. The generator uses the local SDK; publish the updated SDK and update the generated bridge dependency before releasing these application packages.
 
 `--org-config` fills publisher/application identity in the registry entry:
 

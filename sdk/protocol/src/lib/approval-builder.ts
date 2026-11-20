@@ -24,11 +24,13 @@ export class ApprovalBuilder {
   }
 
   /** Builds an approve or reject decision bound to the exact Action Envelope hash. */
-  async buildApproval(envelope: ActionEnvelope, decision: Extract<Decision, "approve" | "reject">): Promise<Approval> {
+  async buildApproval(envelope: ActionEnvelope, decision: Extract<Decision, "approve" | "reject">, options: { reviewArtifact?: CanonicalApprovalPayload["reviewArtifact"] } = {}): Promise<Approval> {
+    if (options.reviewArtifact !== undefined && !/^did:[a-z0-9]+:[^\s]+$/.test(options.reviewArtifact)) throw new TypeError("reviewArtifact must be a DID");
     const actionEnvelopeHash = computeJsonHash(envelope);
     const createdAt = new Date().toISOString();
     const approvalPayload: CanonicalApprovalPayload = {
       type: "ApprovalPayload",
+      ...(options.reviewArtifact !== undefined ? { reviewArtifact: options.reviewArtifact } : {}),
       actionEnvelopeHash,
       decision,
       signerDid: this.signer.did,

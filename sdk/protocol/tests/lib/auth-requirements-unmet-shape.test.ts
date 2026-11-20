@@ -84,7 +84,7 @@ function advisoryFor(policy: PolicyConfig, approvedBy: Did[] = []): ApprovalRequ
   }
   const requirements = buildAuthorizationRequirements({
     actionEnvelope: actionPackage().actionEnvelope,
-    unmetRequirement: result.unmetRequirement,
+    approvalRequirements: result.approvalRequirements,
     verifierDid: VERIFIER,
   });
   if (requirements.result !== "additionalApprovalsRequired") {
@@ -98,7 +98,7 @@ function advisoryFor(policy: PolicyConfig, approvedBy: Did[] = []): ApprovalRequ
 /** Compact view of an approval requirements object for readable assertions. */
 function shape(requirements: ApprovalRequirements): Record<string, string[]> {
   const view = (entries: ApprovalRequirements["anyOf"]) =>
-    (entries ?? []).map((entry) => `${entry.threshold} of ${entry.eligibleSigners.map(nameOf).join(",")}`);
+    (entries ?? []).map(function show(entry): string { return entry.type === 'threshold' ? `${entry.threshold} of ${entry.eligibleSigners.map(nameOf).join(",")}` : `${entry.type}(${entry.requirements.map(show).join('; ')})`; });
   return {
     ...(requirements.anyOf ? { anyOf: view(requirements.anyOf) } : {}),
     ...(requirements.allOf ? { allOf: view(requirements.allOf) } : {}),
@@ -174,9 +174,9 @@ describe("Authorization Requirements keep allOf/anyOf structure", () => {
       ])).toBe("satisfied");
     });
 
-    it("drops an entry that is already satisfied", () => {
+    it("retains an entry that is already satisfied", () => {
       const requirements = advisoryFor(policy, [MAINTAINER_A, MAINTAINER_B]);
-      expect(shape(requirements)).toEqual({ anyOf: ["1 of security"] });
+      expect(shape(requirements)).toEqual({ allOf: ["2 of maintainera,maintainerb", "1 of security"] });
     });
 
     it("emits allOf from the deprecated flat list too", () => {
@@ -277,10 +277,10 @@ describe("Authorization Requirements keep allOf/anyOf structure", () => {
         status: "additionalApprovalsRequired",
         unmetRequirement: { type: "allOf", requirements: [{ type: "anyOf" }] },
       });
-      expect(shape(advisoryFor(policy, [SECURITY]))).toEqual({ anyOf: ["1 of admin", "1 of owner"] });
+      expect(shape(advisoryFor(policy, [SECURITY]))).toEqual({ anyOf: ["1 of admin", "1 of owner"], allOf: ["1 of security"] });
     });
 
-    it("anyOf whose alternative needs several thresholds → first alternative as allOf (sound)", () => {
+    it("anyOf preserves every composite alternative (exact)", () => {
       // "Two maintainers and a security reviewer, or one admin" has no exact §5.8.5 form.
       const policy = policyWithDefault({
         type: "anyOf",
@@ -295,11 +295,11 @@ describe("Authorization Requirements keep allOf/anyOf structure", () => {
         },
       });
       const requirements = advisoryFor(policy);
-      expect(shape(requirements)).toEqual({ allOf: ["2 of maintainera,maintainerb", "1 of security"] });
-      expect(disagreements(policy, requirements, "sound")).toEqual([]);
+      expect(shape(requirements)).toEqual({ anyOf: ["allOf(2 of maintainera,maintainerb; 1 of security)", "1 of admin"] });
+      expect(disagreements(policy, requirements, "exact")).toEqual([]);
     });
 
-    it("allOf over two anyOf groups → first group as anyOf, first alternative of the other required (sound)", () => {
+    it("allOf preserves both independent choices (exact)", () => {
       const policy = policyWithDefault({
         type: "allOf",
         requirements: [
@@ -308,8 +308,8 @@ describe("Authorization Requirements keep allOf/anyOf structure", () => {
         ],
       });
       const requirements = advisoryFor(policy);
-      expect(shape(requirements)).toEqual({ anyOf: ["1 of admin", "1 of owner"], allOf: ["1 of security"] });
-      expect(disagreements(policy, requirements, "sound")).toEqual([]);
+      expect(shape(requirements)).toEqual({ allOf: ["anyOf(1 of admin; 1 of owner)", "anyOf(1 of security; 2 of maintainera,maintainerb)"] });
+      expect(disagreements(policy, requirements, "exact")).toEqual([]);
     });
 
     it("three levels deep stays sound", () => {
@@ -328,8 +328,7 @@ describe("Authorization Requirements keep allOf/anyOf structure", () => {
       });
       const requirements = advisoryFor(policy);
       expect(shape(requirements)).toEqual({
-        anyOf: ["1 of security", "1 of admin"],
-        allOf: ["1 of owner", "1 of maintainera,maintainerb"],
+        allOf: ["1 of owner", "anyOf(allOf(1 of maintainera,maintainerb; anyOf(1 of security; 1 of admin)); 2 of maintainera,maintainerb)"],
       });
       expect(disagreements(policy, requirements, "sound")).toEqual([]);
     });
